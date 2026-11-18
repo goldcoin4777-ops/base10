@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Base10</title>
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Base10">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  body{background:#020617;}
+  .bead{transition:transform .16s cubic-bezier(.2,.9,.3,1.15),background .1s}
+  .pop{animation:pop .25s ease-out}
+  @keyframes pop{0%{transform:scale(.94);opacity:.5}100%{transform:scale(1);opacity:1}}
+  .key:active{transform:scale(.95)}
+  #screen::-webkit-scrollbar{width:0}
+  [data-sq]{touch-action:none;cursor:grab}
+  .shake{animation:shake .3s}
+  @keyframes shake{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+</style>
+</head>
+<body class="text-white">
+<div id="app" class="mx-auto max-w-[420px] h-[100dvh] sm:h-[880px] sm:my-4 flex flex-col bg-slate-900 sm:rounded-[2rem] sm:border-2 sm:border-slate-700 overflow-hidden relative">
+  <header id="top" class="px-5 pt-5 pb-3 border-b border-slate-800"></header>
+  <main id="screen" class="flex-1 overflow-y-auto px-5 pt-4 pb-28"></main>
+  <nav id="nav" class="absolute bottom-0 inset-x-0 bg-slate-950 border-t border-slate-700 grid grid-cols-5"></nav>
+</div>
+<div id="land" class="hidden fixed inset-0 z-50 bg-black overflow-hidden"></div>
+<script>
+/* ===== Configuración ===== */
+const CFG={PREC:.9,TIME:3,DAYS:3,N_REPASO:10,WARM_SECS:45,N_SORO:5,N_REAL:3,N_ANZAN:3};
+/* Pistas del soroban: niveles por dígitos (t = segundos máximos promedio por reto) */
+const SUM_LV=[{l:'1 dígito',t:6,d:1},{l:'2 dígitos',t:10,d:2},{l:'3 dígitos',t:15,d:3},{l:'4 dígitos',t:20,d:4}];
+const TRACKS={
+  suma:{name:'Suma',ic:'plus',need:1,levels:SUM_LV},
+  resta:{name:'Resta',ic:'minus',need:2,levels:SUM_LV},
+  mixto:{name:'Mixto: sumas y restas',ic:'arrow-up-down',need:2,levels:[{l:'1 dígito',t:10,d:1},{l:'2 dígitos',t:16,d:2},{l:'3 dígitos',t:24,d:3},{l:'4 dígitos',t:32,d:4}]},
+  mult:{name:'Multiplicación',ic:'x',need:3,levels:[{l:'1 × 1',t:8,a:1,b:1},{l:'2 × 1',t:15,a:2,b:1},{l:'3 × 1',t:20,a:3,b:1},{l:'2 × 2',t:30,a:2,b:2}]},
+  div:{name:'División',ic:'divide',need:4,levels:[{l:'2 ÷ 1',t:10,a:2,b:1},{l:'3 ÷ 1',t:20,a:3,b:1},{l:'3 ÷ 2',t:30,a:3,b:2}]}
+};
+const LEVELS=[
+  {n:1,name:'Sumas',ops:['+']},
+  {n:2,name:'Sumas y restas',ops:['+','−']},
+  {n:3,name:'+ Multiplicación',ops:['+','−','×']},
+  {n:4,name:'Las cuatro operaciones',ops:['+','−','×','÷']}
+];
+const STRATS={
+  '+':['Completar el 10','Lo sabía de memoria','Conté','Otra forma'],
+  '−':['Bajar al 10','Pensé en la suma inversa','Lo sabía de memoria','Conté'],
+  '×':['Atajo del 10 (×10 y ajustar)','Mitad de ×10 (para ×5)','Dobles','Lo sabía de memoria'],
+  '÷':['Duplicar y dividir entre 10','Pensé en la multiplicación','Lo sabía de memoria','Otra forma']
+};
+const OPNAME={'+':'Suma','−':'Resta','×':'Multiplicación','÷':'División'};
+
+/* ===== Estado persistente ===== */
+const KEY='base10-app-v1';
+const DEF=()=>({level:1,qualify:0,lastQualifyDate:null,testMode:true,sessions:[],bank:{},strategies:{},studyDays:[],formDone:{},soroTrack:'suma',soro:Object.fromEntries(Object.keys(TRACKS).map(k=>[k,{lv:1,q:0,last:null}]))});
+let S=load();
+function load(){try{const r=localStorage.getItem(KEY);if(r){const s=Object.assign(DEF(),JSON.parse(r)),d=DEF();for(const k in d.soro)if(!s.soro[k])s.soro[k]=d.soro[k];return s;}}catch(e){}return DEF();}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
+
+/* ===== Utilidades ===== */
+const fmt=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const today=()=>fmt(new Date());
+const yesterday=()=>{const d=new Date();d.setDate(d.getDate()-1);return fmt(d);};
+const rnd=(a,b)=>a+Math.floor(Math.random()*(b-a+1));
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const mean=a=>a.length?a.reduce((s,x)=>s+x,0)/a.length:0;
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+function studyStreak(){const set=new Set(S.studyDays);const d=new Date();if(!set.has(fmt(d)))d.setDate(d.getDate()-1);let n=0;while(set.has(fmt(d))){n++;d.setDate(d.getDate()-1);}return n;}
+const card=(h,c='bg-slate-800')=>`<div class="rounded-3xl ${c} p-5 mb-4">${h}</div>`;
+
+/* ===== Generador de ejercicios ===== */
+function gen(op){
+  let a,b,ans;
+  if(op==='+'){
+    if(Math.random()<.6){a=rnd(2,9);b=rnd(Math.max(2,11-a),9);}
+    else{a=rnd(1,8)*10+rnd(2,9);b=rnd(Math.max(2,11-a%10),9);}
+    ans=a+b;
+  }else if(op==='−'){
+    if(Math.random()<.6){a=rnd(11,18);b=rnd(a%10+1,9);}
+    else{a=rnd(2,9)*10+rnd(1,8);b=rnd(a%10+1,9);}
+    ans=a-b;
+  }else if(op==='×'){a=rnd(2,9);b=rnd(2,9);ans=a*b;}
+  else{b=rnd(2,9);ans=rnd(2,9);a=b*ans;}
+  return {a,b,op,ans,key:a+op+b};
+}
+
+/* ===== "¿Cómo se piensa?" ===== */
+function hint(e){
+  const {a,b,op}=e;
+  if(op==='+'){
+    const u=a%10,need=10-u,t=a+need;
+    if(u&&b===need)return [`${b} es justo lo que le falta a ${a} para llegar a ${t}.`,`${a} + ${b} = ${t}`];
+    if(u&&b>need)return [`A ${a} le faltan ${need} para llegar a ${t}.`,`Tomas ${need} del ${b}: te quedan ${b-need}.`,`${t} + ${b-need} = ${a+b}`];
+    return [`${a} + ${b} = ${a+b}`];
+  }
+  if(op==='−'){
+    const u=a%10;
+    if(u&&b>u)return [`Primero quitas ${u} para bajar a ${a-u}.`,`Te faltan por quitar ${b-u}.`,`${a-u} − ${b-u} = ${a-b}`];
+    return [`${a} − ${b} = ${a-b}`];
+  }
+  if(op==='×'){
+    const big=Math.max(a,b),small=Math.min(a,b);
+    if(small===5||big===5){const o=small===5?big:small;return [`${o} × 10 = ${o*10}`,`× 5 es la mitad de × 10.`,`La mitad de ${o*10} es ${o*5}`];}
+    if(small===2)return [`× 2 es el doble.`,`${big} + ${big} = ${big*2}`];
+    if(big>=6)return [`Piensa en ${small} × 10 = ${small*10}.`,`Pero son ${big} veces, no 10: sobran ${10-big} × ${small} = ${small*(10-big)}.`,`${small*10} − ${small*(10-big)} = ${a*b}`];
+    if(big===4)return [`× 4 es el doble del doble.`,`Doble de ${small}: ${small*2}`,`Doble de ${small*2}: ${small*4}`];
+    return [`${big} × ${small} = ${Array(small).fill(big).join(' + ')} = ${a*b}`];
+  }
+  if(b===5)return [`Duplicas los dos números: ${a} × 2 = ${a*2} y 5 × 2 = 10.`,`${a*2} ÷ 10 = ${a/5} (quitas el cero).`];
+  if(b===2)return [`÷ 2 es sacar la mitad.`,`La mitad de ${a} es ${a/2}`];
+  return [`Pregúntate: ¿qué número por ${b} da ${a}?`,`${b} × ${a/b} = ${a}`,`Entonces ${a} ÷ ${b} = ${a/b}`];
+}
+const hintBox=(steps,e)=>`<div class="pop rounded-2xl bg-sky-950 border-2 border-sky-500 p-4 mb-3"><div class="flex items-center gap-2 text-xl font-bold text-sky-200 mb-2"><i data-lucide="lightbulb" class="w-6 h-6"></i>Así se piensa</div>${e?pict(e):''}<ol class="space-y-1">${steps.map((s,i)=>`<li class="text-xl text-white"><span class="font-bold text-sky-300">${i+1}.</span> ${s}</li>`).join('')}</ol></div>`;
+
+/* ===== Banco de errores ===== */
+function updBank(e,mastered){
+  const k=e.key,b=S.bank[k];
+  if(mastered){if(b){b.w--;if(b.w<=0)delete S.bank[k];}}
+  else S.bank[k]={a:e.a,b:e.b,op:e.op,ans:e.ans,key:k,w:Math.min(3,(b?b.w:0)+1)};
+  save();
+}
+
+/* ===== Nivel y medición ===== */
+function evaluate(acc,avg){
+  const ok=acc>=CFG.PREC&&avg<CFG.TIME;let unlocked=false;const d=today();
+  if(ok){
+    if(S.testMode)S.qualify++;
+    else if(S.lastQualifyDate===d){}
+    else if(S.lastQualifyDate===yesterday())S.qualify++;
+    else S.qualify=1;
+    S.lastQualifyDate=d;
+    if(S.qualify>=CFG.DAYS&&S.level<4){S.level++;S.qualify=0;S.lastQualifyDate=null;unlocked=true;}
+  }else{S.qualify=0;S.lastQualifyDate=null;}
+  save();return {ok,unlocked};
+}
+
+/* ===== Retos del soroban por pista ===== */
+const nd=d=>d===1?rnd(1,9):rnd(10**(d-1),10**d-1);
+const nd2=d=>d===1?rnd(2,9):nd(d);
+function genSoro(k,L){
+  const d=L.d;
+  if(k==='suma'){const a=nd(d),b=nd(d);return {a,b,op:'+',ans:a+b,text:`${a} + ${b}`};}
+  if(k==='resta'){let a=nd(d),b=nd(d);while(a===b)b=nd(d);if(b>a)[a,b]=[b,a];return {a,b,op:'−',ans:a-b,text:`${a} − ${b}`};}
+  if(k==='mixto'){
+    const lo=d===1?1:10**(d-1);let t=nd(d);const terms=[{s:'',n:t}];
+    for(const s of (Math.random()<.5?['+','−']:['−','+'])){let n;if(s==='+'){n=nd(d);t+=n;}else{n=rnd(lo,Math.min(10**d-1,t));t-=n;}terms.push({s,n});}
+    return {terms,ans:t,text:terms.map((x,i)=>i?`${x.s} ${x.n}`:x.n).join(' ')};
+  }
+  if(k==='mult'){const a=nd2(L.a),b=nd2(L.b);return {a,b,op:'×',ans:a*b,text:`${a} × ${b}`};}
+  let b,qmin,qmax;
+  do{b=nd2(L.b);qmin=Math.max(2,Math.ceil(10**(L.a-1)/b));qmax=Math.floor((10**L.a-1)/b);}while(qmin>qmax);
+  const q=rnd(qmin,qmax);return {a:b*q,b,op:'÷',ans:q,text:`${b*q} ÷ ${b}`};
+}
+const places=n=>String(n).split('').map((c,i,arr)=>+c*10**(arr.length-1-i)).filter(x=>x>0);
+function soroHint(e){
+  if(e.terms){let t=e.terms[0].n;const out=[`Coloca el ${t}.`];for(const x of e.terms.slice(1)){const nt=x.s==='+'?t+x.n:t-x.n;out.push(`${x.s==='+'?'Suma':'Resta'} ${x.n}: ${t} ${x.s} ${x.n} = ${nt}`);t=nt;}return out;}
+  if(e.op==='+'||e.op==='−'){
+    if(e.a<10&&e.b<10)return hint(e);
+    let t=e.a;const out=[`Coloca el ${e.a}. Luego ${e.op==='+'?'suma':'resta'} ${e.b} por columnas, de izquierda a derecha:`];
+    for(const p of places(e.b)){const nt=e.op==='+'?t+p:t-p;out.push(`${t} ${e.op} ${p} = ${nt}`);t=nt;}return out;
+  }
+  if(e.op==='×'){
+    if(e.a<10&&e.b<10)return hint(e);
+    const big=e.b>=10?e.b:e.a,other=e.b>=10?e.a:e.b,ps=places(big),pr=ps.map(p=>p*other);
+    return [`Separa ${big} por posiciones: ${ps.join(' + ')}.`,...ps.map((p,i)=>`${p} × ${other} = ${pr[i]}`),`Suma: ${pr.join(' + ')} = ${e.ans}`];
+  }
+  if(e.a<100&&e.b<10)return hint(e);
+  return [`¿Qué número por ${e.b} da ${e.a}?`,`${e.b} × ${e.ans} = ${e.a}`,`Entonces ${e.a} ÷ ${e.b} = ${e.ans}`];
+}
+function evalTrack(k,acc,avg){
+  const T=TRACKS[k],P=S.soro[k],L=T.levels[P.lv-1],ok=acc>=CFG.PREC&&avg<L.t,d=today();let unlocked=false;
+  if(ok){
+    if(S.testMode)P.q++;else if(P.last===d){}else if(P.last===yesterday())P.q++;else P.q=1;
+    P.last=d;if(P.q>=CFG.DAYS&&P.lv<T.levels.length){P.lv++;P.q=0;P.last=null;unlocked=true;}
+  }else{P.q=0;P.last=null;}
+  save();return {ok,unlocked};
+}
+const curTrack=()=>{const k=S.soroTrack;return TRACKS[k]&&TRACKS[k].need<=S.level&&S.formDone[TRACK_AREA[k]]?k:'suma';};
+function startTrack(k){if(!S.formDone[TRACK_AREA[k]]){startForm(TRACK_AREA[k]);return;}S.soroTrack=k;save();startRun('soroban');}
+function setTrackLv(k,n){const P=S.soro[k];P.lv=n;P.q=0;P.last=null;save();render();}
+
+/* ===== Teclado numérico ===== */
+let inp='';
+const DISP='h-20 rounded-2xl bg-slate-950 border-2 border-slate-500 flex items-center justify-center text-5xl font-extrabold tracking-wider mb-3 transition-colors';
+function padHTML(){
+  const k=(l,fn,c='bg-slate-700')=>`<button class="key ${c} rounded-2xl h-16 text-3xl font-bold" onclick="${fn}">${l}</button>`;
+  return `<div id="disp" class="${DISP}">${inp||'<span class="text-slate-400">?</span>'}</div>
+  <div class="grid grid-cols-3 gap-2">${[1,2,3,4,5,6,7,8,9].map(n=>k(n,`press('${n}')`)).join('')}${k('<i data-lucide="delete" class="w-8 h-8 mx-auto"></i>','del()','bg-slate-800')}${k('0',"press('0')")}${k('OK','submitPad()','bg-emerald-600')}</div>`;
+}
+function updDisp(){const el=document.getElementById('disp');if(el)el.innerHTML=inp||'<span class="text-slate-400">?</span>';}
+function press(d){if(inp.length<5){inp+=d;updDisp();}}
+function del(){inp=inp.slice(0,-1);updDisp();}
+function submitPad(){if(!inp||!run||!run.onSubmit)return;const v=parseInt(inp,10);inp='';run.onSubmit(v);}
+function flash(ok){const el=document.getElementById('disp');if(!el)return;el.className=DISP.replace('bg-slate-950 border-slate-500',ok?'bg-emerald-900 border-emerald-400':'bg-rose-900 border-rose-400');}
+function resetDisp(){const el=document.getElementById('disp');if(el){el.className=DISP;updDisp();}}
+document.addEventListener('keydown',e=>{if(!document.getElementById('disp'))return;if(/^[0-9]$/.test(e.key))press(e.key);else if(e.key==='Backspace')del();else if(e.key==='Enter')submitPad();});
+
+/* ===== Soroban ===== */
+let rods=newRods(5),landscape=false,drag=null,landTimer=null,digitsOn=true,AC=null;
+let soundOn=(()=>{try{return localStorage.getItem('b10-sound')!=='0';}catch(e){return true;}})();
+const ORANGE='#ff6b00',FRAME='#3a3a3a';
+function newRods(n){return Array.from({length:n},()=>({h:0,e:0}));}
+function soroVal(){return rods.reduce((s,r,i)=>s+(r.h*5+r.e)*10**(rods.length-1-i),0);}
+function setRodCount(n){if(rods.length===n)return;let x=soroVal();rods=newRods(n);for(let i=n-1;i>=0&&x>0;i--){const d=x%10;rods[i]={h:d>=5?1:0,e:d%5};x=Math.floor(x/10);}}
+function resetRods(){rods=newRods(rods.length);}
+function setH(i,v){if(rods[i].h===v)return;rods[i].h=v;clack(1);updAbacus();}
+function setE(i,v){const d=Math.abs(rods[i].e-v);if(!d)return;rods[i].e=v;clack(d);updAbacus();}
+function clearAbacus(){ensureAudio();const had=soroVal()>0;resetRods();if(had)clack(4);updAbacus();}
+function updAbacus(){
+  const el=document.getElementById('abacus');if(!el)return;const g=geo(el.dataset.mode);
+  el.querySelectorAll('[data-bead]').forEach(b=>{const i=+b.dataset.i,k=+b.dataset.k,r=rods[i];if(!r)return;const h=b.dataset.bead==='h',on=h?r.h:(k<=r.e?1:0);b.style.transition='';b.style.background=beadBg(on);b.style.transform=`translate(-50%,${h?beadY(g,'h',0,r.h):beadY(g,'e',k,on?0:1)}px)`;});
+  rods.forEach((r,i)=>{const d=document.getElementById('dg'+i);if(d)d.textContent=r.h*5+r.e;});
+  const v=document.getElementById('sval');if(v)v.textContent=soroVal();
+}
+
+/* Sonido de choque de cuentas (sintetizado) */
+function ensureAudio(){try{if(!AC)AC=new(window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume();}catch(e){}}
+function clack(n=1){
+  if(!soundOn||!AC)return;
+  try{
+    const t=AC.currentTime,vol=Math.min(1,.55+.12*n),len=.045,buf=AC.createBuffer(1,Math.floor(AC.sampleRate*len),AC.sampleRate),d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,7);
+    const src=AC.createBufferSource();src.buffer=buf;const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=2300+Math.random()*700;bp.Q.value=2.5;const g=AC.createGain();g.gain.value=vol;
+    src.connect(bp).connect(g).connect(AC.destination);src.start(t);
+    const o=AC.createOscillator();o.type='triangle';o.frequency.setValueAtTime(1500+Math.random()*300,t);const og=AC.createGain();og.gain.setValueAtTime(.22*vol,t);og.gain.exponentialRampToValueAtTime(.001,t+.035);
+    o.connect(og).connect(AC.destination);o.start(t);o.stop(t+.04);
+  }catch(e){}
+}
+function toggleSound(){soundOn=!soundOn;try{localStorage.setItem('b10-sound',soundOn?'1':'0');}catch(e){}ensureAudio();clack(1);render();}
+function toggleDigits(){digitsOn=!digitsOn;render();}
+
+/* Geometría: vertical (p) u horizontal (l) */
+function stageSize(){const vw=innerWidth,vh=innerHeight;return {W:Math.max(vw,vh),H:Math.min(vw,vh),rot:vh>vw};}
+function geo(mode){
+  if(mode!=='l')return {n:5,colW:70,bh:34,bw:62,dig:30};
+  const s=stageSize(),areaW=s.W-96-40,n=areaW>=700?9:7,areaH=s.H-70-56-28-16;
+  const bh=Math.max(20,Math.min(64,Math.floor((areaH-26)/7)-2));
+  const colW=Math.min(Math.floor((areaW-28)/n),Math.round(bh*2.3));
+  return {n,colW,bh,bw:Math.min(colW-6,Math.round(bh*1.9)),dig:Math.max(22,Math.round(bh*.9))};
+}
+/* Posición vertical de cada cuenta. f: 0 = arriba, 1 = abajo (cielo: 1 = activa; tierra: 0 = activa) */
+function beadY(g,kind,k,f){const slot=g.bh+2;if(kind==='h')return 2+f*slot;return 2*g.bh+6+14+2+(k-1)*slot+f*slot;}
+const beadBg=on=>`linear-gradient(to bottom,${on?'#ff7a1a 0 50%,#e35a00 50% 100%':'#474747 0 50%,#393939 50% 100%'})`;
+function abacusHTML(mode='p'){
+  const g=geo(mode),n=rods.length,heavenH=2*g.bh+6,H=heavenH+14+5*(g.bh+2)+4;
+  const bead=(kind,i,k,on,y)=>`<div data-bead="${kind}" data-i="${i}" data-k="${k}" class="bead absolute left-1/2 top-0 z-10 cursor-pointer" style="width:${g.bw}px;height:${g.bh}px;clip-path:polygon(22% 0,78% 0,100% 50%,78% 100%,22% 100%,0 50%);background:${beadBg(on)};transform:translate(-50%,${y}px)"></div>`;
+  const cols=rods.map((r,i)=>{
+    let b=bead('h',i,0,r.h,beadY(g,'h',0,r.h));
+    for(let k=1;k<=4;k++){const on=k<=r.e;b+=bead('e',i,k,on,beadY(g,'e',k,on?0:1));}
+    return `<div class="relative" style="width:${g.colW}px;height:${H}px"><div class="absolute top-0 bottom-0 left-1/2 -translate-x-1/2" style="background:${FRAME};width:${Math.max(5,Math.round(g.bh/4))}px"></div>${b}</div>`;
+  }).join('');
+  const dots=rods.map((_,i)=>(n-1-i)%3===0?`<span class="absolute bg-gray-400" style="width:5px;height:5px;left:${4+(i+.5)*g.colW-2.5}px;top:4.5px"></span>`:'').join('');
+  const digits=digitsOn?`<div class="flex justify-center mt-2">${rods.map((r,i)=>`<div id="dg${i}" class="text-center" style="width:${g.colW}px;color:${ORANGE};font-size:${g.dig}px;line-height:1.1">${r.h*5+r.e}</div>`).join('')}</div>`:'';
+  return `<div id="abacus" data-mode="${mode}" class="select-none" style="touch-action:none"><div class="mx-auto bg-black" style="width:fit-content;border:solid ${FRAME};border-width:14px 10px"><div class="relative flex px-1">${cols}<div class="absolute left-0 right-0 z-[5]" style="background:${FRAME};top:${heavenH}px;height:14px">${dots}</div></div></div>${digits}</div>`;
+}
+
+/* Clic y arrastre de cuentas: la cuenta sigue el dedo, empuja a sus vecinas y al soltar se desliza a su lugar */
+const rotatedNow=()=>landscape&&innerHeight>innerWidth;
+document.addEventListener('pointerdown',ev=>{
+  const b=ev.target.closest('[data-bead]');if(!b)return;ev.preventDefault();ensureAudio();
+  const ab=document.getElementById('abacus'),i=+b.dataset.i,k=+b.dataset.k,r=rods[i],h=b.dataset.bead==='h';
+  drag={t:b.dataset.bead,i,k,x:ev.clientX,y:ev.clientY,moved:false,g:geo(ab.dataset.mode),f0:h?r.h:(k<=r.e?0:1),f:null,els:[...ab.querySelectorAll(`[data-bead][data-i="${i}"]`)]};
+});
+window.addEventListener('pointermove',ev=>{
+  if(!drag)return;const dx=ev.clientX-drag.x,dy=ev.clientY-drag.y,ly=rotatedNow()?-dx:dy;
+  if(!drag.moved&&Math.abs(ly)<4)return;drag.moved=true;
+  const slot=drag.g.bh+2,r=rods[drag.i],f=Math.max(0,Math.min(1,drag.f0+ly/slot));drag.f=f;
+  if(drag.t==='h'){const el=drag.els.find(e=>e.dataset.bead==='h');el.style.transition='none';el.style.transform=`translate(-50%,${beadY(drag.g,'h',0,f)}px)`;return;}
+  drag.els.filter(e=>e.dataset.bead==='e').forEach(e=>{const j=+e.dataset.k;let fj=j<=r.e?0:1;fj=j<drag.k?Math.min(fj,f):j>drag.k?Math.max(fj,f):f;e.style.transition='none';e.style.transform=`translate(-50%,${beadY(drag.g,'e',j,fj)}px)`;});
+});
+window.addEventListener('pointerup',()=>{
+  if(!drag)return;const d=drag;drag=null;const r=rods[d.i];
+  if(!d.moved){if(d.t==='h')setH(d.i,r.h^1);else setE(d.i,d.k<=r.e?d.k-1:d.k);return;}
+  const mv=d.f-d.f0,tgt=Math.abs(mv)>.3?(mv>0?1:0):d.f0;
+  if(d.t==='h'){if(tgt!==r.h)setH(d.i,tgt);else updAbacus();return;}
+  const ne=tgt===0?Math.max(r.e,d.k):Math.min(r.e,d.k-1);if(ne!==r.e)setE(d.i,ne);else updAbacus();
+});
+window.addEventListener('pointercancel',()=>{if(drag){drag=null;updAbacus();}});
+
+/* Pantalla horizontal */
+function openLand(){
+  landscape=true;setRodCount(geo('l').n);
+  try{const el=document.documentElement;if(el.requestFullscreen)el.requestFullscreen().then(()=>{try{screen.orientation.lock('landscape').catch(()=>{});}catch(e){}}).catch(()=>{});}catch(e){}
+  render();
+}
+function closeLand(){landscape=false;setRodCount(5);try{if(document.fullscreenElement)document.exitFullscreen();}catch(e){}render();}
+window.addEventListener('resize',()=>{if(landscape){setRodCount(geo('l').n);render();}});
+function vLand(){
+  const s=stageSize(),inRun=run&&run.stage==='soroban'&&!run.intro,st=inRun?run.st:null,e=inRun?st.list[st.i]:null;
+  const pos=s.rot?`position:absolute;top:50%;left:50%;width:${s.W}px;height:${s.H}px;transform:translate(-50%,-50%) rotate(90deg)`:'position:absolute;inset:0';
+  const sb=(ic,fn,lbl='')=>`<button onclick="${fn}" class="flex flex-col items-center gap-1 text-white py-1"><i data-lucide="${ic}" class="w-8 h-8"></i>${lbl?`<span class="text-lg">${lbl}</span>`:''}</button>`;
+  let title,extra='';
+  if(inRun){
+    title=e.text;
+    extra=st.phase==='q'?`<button onclick="soroCheck()" class="ml-5 rounded-xl text-black font-extrabold text-xl px-5 py-2" style="background:${ORANGE}">Comprobar</button>`
+      :`<span class="ml-5 text-2xl font-bold ${st.phase==='ok'?'text-emerald-400':'text-rose-400'}">${st.phase==='ok'?'¡Correcto!':'Era '+e.ans}</span><button onclick="soroNext()" class="ml-3 rounded-xl bg-white text-black font-extrabold text-xl px-5 py-2">Siguiente</button>`;
+  }else title=digitsOn?`<span id="sval" style="color:${ORANGE}">${soroVal()}</span>`:'Soroban';
+  const side=`<div class="w-24 shrink-0 flex flex-col items-center py-4 gap-4" style="background:radial-gradient(circle at 50% 100%,transparent 38%,#232323 39% 44%,transparent 45%) 0 0/26px 13px,#0d0d0d">
+    ${sb('arrow-left','closeLand()')}
+    ${inRun?`<div class="flex flex-col items-center text-white"><i data-lucide="clipboard-list" class="w-8 h-8"></i><span class="text-lg">${st.i+1} / ${st.list.length}</span></div><div class="flex flex-col items-center text-white"><i data-lucide="timer" class="w-8 h-8"></i><span id="ltime" class="text-lg">0:00</span></div>`:''}
+    <div class="flex-1"></div>
+    ${sb('rotate-ccw','clearAbacus()')}${sb(digitsOn?'eye':'eye-off','toggleDigits()')}${sb(soundOn?'volume-2':'volume-x','toggleSound()')}</div>`;
+  return `<div style="${pos}" class="flex bg-black">${side}<div class="flex-1 flex flex-col items-center justify-center px-4"><div class="flex items-center mb-3"><span class="text-5xl font-bold text-white">${title}</span>${extra}</div>${abacusHTML('l')}</div></div>`;
+}
+const soroControls=()=>`<div class="grid grid-cols-3 gap-2 mb-3">
+  <button onclick="openLand()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="rectangle-horizontal" class="w-7 h-7"></i><span class="text-base font-semibold">Horizontal</span></button>
+  <button onclick="toggleDigits()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="${digitsOn?'eye':'eye-off'}" class="w-7 h-7"></i><span class="text-base font-semibold">Dígitos</span></button>
+  <button onclick="toggleSound()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="${soundOn?'volume-2':'volume-x'}" class="w-7 h-7"></i><span class="text-base font-semibold">Sonido</span></button></div>`;
+
+/* ===== Cuadros: dibujo (pictórico) ===== */
+function sqDiv(code,attrs='',s=26){
+  const st=code==='t'?'background:#0f6e56;border:2px solid #1d9e75':code==='c'?'background:#993c1d;border:2px solid #d85a30':code==='x'?'background:transparent;border:2px dashed #d85a30':'background:transparent;border:2px dashed #475569';
+  return `<div ${attrs} class="rounded-[5px] shrink-0" style="width:${s}px;height:${s}px;${st}"></div>`;
+}
+function pictCols(cols,s){return `<div class="flex justify-center items-end gap-[3px] my-3">${cols.map(c=>`<div class="flex flex-col-reverse gap-[2px]">${c.map(x=>sqDiv(x,'',s)).join('')}</div>`).join('')}</div>`;}
+function pict(e){
+  if(!e||e.terms)return '';
+  const {a,b,op}=e,tens=n=>[...Array(Math.floor(n/10))].map(()=>Array(10).fill('t'));
+  if(op==='+'){
+    if(a+b>100)return '';const cols=tens(a),u=a%10;let rest=b;
+    if(u){const add=Math.min(10-u,rest);cols.push([...Array(u).fill('t'),...Array(add).fill('c')]);rest-=add;}
+    while(rest>0){const n=Math.min(10,rest);cols.push(Array(n).fill('c'));rest-=n;}
+    return pictCols(cols,a+b<=20?18:12);
+  }
+  if(op==='−'){
+    if(a>100)return '';const cols=tens(a);if(a%10)cols.push(Array(a%10).fill('t'));let r=b;
+    for(let k=cols.length-1;k>=0&&r>0;k--)for(let j=cols[k].length-1;j>=0&&r>0;j--){cols[k][j]='x';r--;}
+    return pictCols(cols,a<=20?18:12);
+  }
+  if(op==='×'){
+    if(a>10||b>10)return '';const big=Math.max(a,b),small=Math.min(a,b);let cols;
+    if(small!==2&&(big===5||small===5)){const o=small===5?big:small;cols=[...Array(10)].map((_,k)=>Array(o).fill(k<5?'t':'x'));}
+    else if(small!==2&&big>=6)cols=[...Array(10)].map((_,k)=>Array(small).fill(k<big?'t':'x'));
+    else cols=[...Array(big)].map(()=>Array(small).fill('t'));
+    return pictCols(cols,16);
+  }
+  if(a>100||b>10)return '';
+  return pictCols([...Array(a/b)].map(()=>Array(b).fill('t')),14);
+}
+
+/* ===== Sonidos de pegar / despegar ===== */
+function nb(t,len,f,vol,q=1.2){const buf=AC.createBuffer(1,Math.floor(AC.sampleRate*len),AC.sampleRate),d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,4);const s=AC.createBufferSource();s.buffer=buf;const fl=AC.createBiquadFilter();fl.type='bandpass';fl.frequency.value=f;fl.Q.value=q;const g=AC.createGain();g.gain.value=vol;s.connect(fl).connect(g).connect(AC.destination);s.start(t);}
+function tone(t,f0,f1,len,vol,type='sine'){const o=AC.createOscillator();o.type=type;o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+len);const g=AC.createGain();g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+len);o.connect(g).connect(AC.destination);o.start(t);o.stop(t+len+.02);}
+function sndSnap(){if(!soundOn||!AC)return;try{const t=AC.currentTime;nb(t,.025,1200,.9);nb(t+.016,.03,2600,.7);nb(t+.034,.04,1800,.5);tone(t,170,70,.09,.5);}catch(e){}}
+function sndUnsnap(){if(!soundOn||!AC)return;try{const t=AC.currentTime;tone(t,320,900,.07,.3);nb(t,.02,3000,.25,2);}catch(e){}}
+function sndWin(){if(!soundOn||!AC)return;try{const t=AC.currentTime;[523,659,784].forEach((f,i)=>tone(t+i*.09,f,f,.18,.18,'triangle'));}catch(e){}}
+
+/* ===== Formación con cuadros ===== */
+const AREAS=['suma','resta','mult','div'],AREA_OF={'+':'suma','−':'resta','×':'mult','÷':'div'};
+const TRACK_AREA={suma:'suma',resta:'resta',mixto:'resta',mult:'mult',div:'div'};
+const FORM={
+  suma:{title:'Completar el 10',ic:'plus',need:1,ex:{a:8,b:7,op:'+'},
+    intro:['Contamos en grupos de 10: una columna llena es una <b>decena</b>.','Para sumar, primero llenas la columna hasta 10 con cuadros del otro número.','Así 8 + 7 se convierte en 10 + 5, que es fácil.'],
+    tasks:[{t:'complete',a:7,b:3},{t:'complete',a:8,b:7},{t:'complete',a:9,b:6}]},
+  resta:{title:'Bajar al 10',ic:'minus',need:2,ex:{a:13,b:5,op:'−'},
+    intro:['Para restar, primero quitas los sueltos y bajas justo a 10.','Después quitas lo que falta de la decena.','13 − 5: quitas 3 (llegas a 10) y luego 2 más → 8.'],
+    tasks:[{t:'down',a:13,b:5},{t:'down',a:15,b:7},{t:'down',a:12,b:4}]},
+  mult:{title:'Multiplicar es un rectángulo',ic:'x',need:3,ex:{a:6,b:9,op:'×'},
+    intro:['Multiplicar es armar un rectángulo: filas × columnas.','Si lo giras, es el mismo rectángulo: 3 × 4 = 4 × 3.','Un atajo: 9 × 6 es un rectángulo de 10 × 6 al que le quitas una columna.'],
+    tasks:[{t:'build',r:3,c:4},{t:'build',r:4,c:6},{t:'remove',r:6,c:10,target:9}]},
+  div:{title:'Dividir es formar columnas',ic:'divide',need:4,ex:{a:12,b:3,op:'÷'},
+    intro:['Dividir es acomodar cuadros en columnas de un tamaño.','Las columnas completas son el resultado.','Lo que no completa una columna, lo "comido", es el <b>residuo</b>.'],
+    tasks:[{t:'group',a:12,b:3},{t:'group',a:14,b:3},{t:'group',a:20,b:6}]}
+};
+function pendingForm(){for(const op of LEVELS[S.level-1].ops){const a=AREA_OF[op];if(!S.formDone[a])return a;}return null;}
+function startForm(a){clearTimers();run=null;inp='';fm={area:a,ti:0,phase:'intro',warn:''};render();}
+function fmTask(){return FORM[fm.area].tasks[fm.ti];}
+function fmInitTask(){
+  const T=fmTask();fm.warn='';fm.phase='play';
+  fm.st=T.t==='complete'?{A:Array(T.a).fill('t'),B:Array(T.b).fill('c')}
+    :T.t==='down'?{ten:Array(10).fill('t'),loose:Array(T.a-10).fill('t'),trash:[]}
+    :T.t==='build'?{cols:[],rot:false}
+    :T.t==='remove'?{cols:[...Array(T.c)].map(()=>Array(T.r).fill('t')),trash:[]}
+    :{pile:Array(T.a).fill('c'),cols:[...Array(Math.ceil(T.a/T.b))].map(()=>[])};
+}
+function fmBegin(){ensureAudio();fmInitTask();render();}
+function fmReset(){fmInitTask();render();}
+function fmNext(){fm.ti++;if(fm.ti>=FORM[fm.area].tasks.length){S.formDone[fm.area]=true;save();fm.phase='end';sndWin();}else fmInitTask();render();}
+function fmRot(){fm.st.rot=!fm.st.rot;sndSnap();render();}
+function fmIsDone(){const T=fmTask(),s=fm.st;return T.t==='complete'?s.A.length===10:T.t==='down'?s.trash.length===T.b:T.t==='build'?s.cols.length===T.c:T.t==='remove'?s.cols.length===T.target:s.pile.length===0;}
+function fmAct(g,i,to,dragged){
+  if(!fm||fm.phase!=='play')return;
+  const T=fmTask(),s=fm.st;let res=null;
+  if(T.t==='complete'){
+    if(g==='B'&&(!dragged||to==='A')){if(s.A.length<10){s.A.push(s.B.pop());res='snap';}}
+    else if(g==='A'&&(!dragged||to==='B')){if(s.A[s.A.length-1]==='c'){s.B.push(s.A.pop());res='pop';}else res=`Esos cuadros son del ${T.a}: mueve solo los del ${T.b}.`;}
+  }else if(T.t==='down'){
+    if((g==='ten'||g==='loose')&&(!dragged||to==='trash')){
+      if(g==='ten'&&s.loose.length)res='Primero quita los sueltos: así bajas justo al 10.';
+      else if(s.trash.length>=T.b)res=`Ya quitaste ${T.b}.`;
+      else{(g==='ten'?s.ten:s.loose).pop();s.trash.push('c');res='pop';}
+    }else if(g==='trash'&&(!dragged||to==='ten'||to==='loose')){s.trash.pop();if(s.loose.length||s.ten.length===10)s.loose.push('t');else s.ten.push('t');res='snap';}
+  }else if(T.t==='build'){
+    if(g==='disp'&&(!dragged||to==='rect')){if(s.cols.length<T.c){s.cols.push(Array(T.r).fill('t'));res='snap';}else res=`Ya tienes ${T.c} columnas.`;}
+    else if(g==='rect'&&(!dragged||to!=='rect')){s.cols.splice(i,1);res='pop';}
+  }else if(T.t==='remove'){
+    if(g==='rect'&&(!dragged||to!=='rect')){if(s.cols.length>T.target){s.cols.splice(i,1);s.trash.push(1);res='pop';}else res=`Ya quedan ${T.target} columnas.`;}
+    else if(g==='trash'&&(!dragged||to==='rect')){s.trash.pop();s.cols.push(Array(T.r).fill('t'));res='snap';}
+  }else{
+    if(g==='pile'&&(!dragged||(to&&to.startsWith('col')))){const c=s.cols.find(x=>x.length<T.b);if(c){s.pile.pop();c.push('c');res='snap';}}
+    else if(g.startsWith('col')&&(!dragged||to==='pile'||to===null)){const c=s.cols[+g.slice(3)];if(c.length){c.pop();s.pile.push('c');res='pop';}}
+  }
+  if(res==='snap')sndSnap();else if(res==='pop')sndUnsnap();
+  fm.warn=(res&&res!=='snap'&&res!=='pop')?res:'';
+  if(fmIsDone()){fm.phase='done';setTimeout(sndWin,120);}
+  render();
+}
+function colHTML(arr,cap,key,force){
+  let h='';for(let i=cap-1;i>=0;i--){const c=arr[i];h+=c?sqDiv(force||c,`data-sq data-g="${key}" data-i="${i}"`):sqDiv('e');}
+  return `<div data-drop="${key}" class="flex flex-col gap-[3px] p-1 rounded-xl">${h}</div>`;
+}
+const fmLab=t=>`<div class="text-lg font-semibold text-white text-center mt-1">${t}</div>`;
+function rectHTML(cols,key,drag){return cols.map((c,i)=>`<div ${drag?`data-sq data-g="${key}" data-i="${i}"`:''} class="flex flex-col gap-[3px]">${c.map(x=>sqDiv(x,'',24)).join('')}</div>`).join('');}
+function fmBoard(T,s){
+  if(T.t==='complete')return `<div class="flex justify-center items-end gap-10"><div>${colHTML(s.A,10,'A')}${fmLab('Columna del '+T.a)}</div><div>${colHTML(s.B,10,'B')}${fmLab('Del '+T.b)}</div></div>`;
+  if(T.t==='down')return `<div class="flex justify-center items-end gap-4"><div>${colHTML(s.ten,10,'ten')}${fmLab('Decena')}</div><div>${colHTML(s.loose,10,'loose')}${fmLab('Sueltos')}</div><div class="flex-1"><div data-drop="trash" class="rounded-2xl border-2 border-dashed border-rose-400 p-2 flex flex-wrap content-start gap-[3px]" style="min-height:250px">${s.trash.map((c,i)=>sqDiv('c',`data-sq data-g="trash" data-i="${i}"`)).join('')}</div>${fmLab(`Quitar (${s.trash.length}/${T.b})`)}</div></div>`;
+  if(T.t==='build'){
+    const cols=s.rot?[...Array(T.r)].map(()=>Array(T.c).fill('t')):s.cols;
+    return `<div class="flex items-end gap-3"><div class="flex-1"><div data-drop="rect" class="rounded-2xl border-2 border-dashed border-teal-500 p-2 flex items-end gap-[3px]" style="min-height:${Math.max(T.r,T.c)*27+20}px">${rectHTML(cols,'rect',!s.rot&&fm.phase==='play')}</div>${fmLab(s.rot?'Girado':'Tablero')}</div>${fm.phase==='play'?`<div><div data-sq data-g="disp" data-i="0" class="flex flex-col gap-[3px] p-2 rounded-2xl bg-slate-800 border-2 border-teal-400">${Array(T.r).fill(0).map(()=>sqDiv('t','',24)).join('')}</div>${fmLab('Columna')}</div>`:''}</div>`;
+  }
+  if(T.t==='remove')return `<div data-drop="rect" class="rounded-2xl border-2 border-dashed border-teal-500 p-2 flex items-end justify-center gap-[3px]">${rectHTML(s.cols,'rect',fm.phase==='play')}</div>${fmLab('Tablero')}<div data-drop="trash" class="mt-3 rounded-2xl border-2 border-dashed border-rose-400 p-2 flex items-end gap-[3px]" style="min-height:${T.r*27+20}px">${s.trash.map((_,i)=>`<div data-sq data-g="trash" data-i="${i}" class="flex flex-col gap-[3px]">${Array(T.r).fill(0).map(()=>sqDiv('c','',24)).join('')}</div>`).join('')}</div>${fmLab('Quitar')}`;
+  return `<div data-drop="pile" class="rounded-2xl border-2 border-dashed border-rose-400 p-2 flex flex-wrap gap-[3px] mb-3" style="min-height:44px">${s.pile.map((c,i)=>sqDiv('c',`data-sq data-g="pile" data-i="${i}"`)).join('')}</div>${fmLab(`Montón: ${s.pile.length}`)}<div class="flex justify-center items-end gap-2 mt-3">${s.cols.map((c,k)=>colHTML(c,T.b,'col'+k,c.length===T.b?'t':'c')).join('')}</div>`;
+}
+function fmInstr(T){return {complete:`Arrastra (o toca) cuadros del ${T.b} hacia la columna del ${T.a} hasta llenarla.`,down:`Quita ${T.b} cuadros: arrástralos a la zona Quitar. Empieza por los sueltos.`,build:`Arma un rectángulo de ${T.r} filas y ${T.c} columnas: arrastra columnas al tablero.`,remove:`Esto es 10 × ${T.r}. Quita una columna para ver cuánto es 9 × ${T.r}.`,group:`Reparte los ${T.a} cuadros en columnas de ${T.b}: arrástralos o tócalos.`}[T.t];}
+function fmLive(T,s){
+  if(T.t==='complete')return `${s.A.length} + ${s.B.length} = ${T.a+T.b}`;
+  if(T.t==='down')return `${T.a} − ${s.trash.length} = ${T.a-s.trash.length}`;
+  if(T.t==='build'||T.t==='remove')return s.rot?`${T.r} × ${T.c} = ${T.r*T.c}`:`${s.cols.length} × ${T.r} = ${s.cols.length*T.r}`;
+  const full=s.cols.filter(c=>c.length===T.b).length,part=s.cols.reduce((n,c)=>n+(c.length<T.b?c.length:0),0);
+  return `${full} col.${part?` · sobran ${part}`:''}`;
+}
+function fmMsg(T){
+  if(T.t==='complete')return T.a+T.b===10?`¡${T.a} y ${T.b} son pareja del 10! La columna quedó completa.`:`Tomaste ${10-T.a} del ${T.b} para llenar la columna. Ahora es fácil: <b>10 + ${T.a+T.b-10} = ${T.a+T.b}</b>.`;
+  if(T.t==='down')return `Quitaste ${T.a-10} para bajar a 10 y luego ${T.b-(T.a-10)} más: <b>${T.a} − ${T.b} = ${T.a-T.b}</b>.`;
+  if(T.t==='build')return `<b>${T.r} filas × ${T.c} columnas = ${T.r*T.c}</b> cuadros. Toca "Girar": ${T.c} × ${T.r} es el mismo rectángulo, por eso da lo mismo.`;
+  if(T.t==='remove')return `10 × ${T.r} = ${10*T.r}. Quitaste una columna de ${T.r}: ${10*T.r} − ${T.r} = ${9*T.r}. Por eso <b>9 × ${T.r} = ${9*T.r}</b>.`;
+  const q=Math.floor(T.a/T.b),r=T.a%T.b;
+  return r?`<b>${T.a} ÷ ${T.b} = ${q}</b> columnas, y sobran ${r}: ese es el <b>residuo</b>, lo "comido".`:`<b>${T.a} ÷ ${T.b} = ${q}</b>, exacto: no sobra ninguno. ${T.a} es múltiplo de ${T.b}.`;
+}
+function vForm(){
+  const F=FORM[fm.area],n=F.tasks.length;
+  const hdr=`<div class="flex items-center justify-between mb-3"><div class="text-lg font-semibold text-white">Formación · ${F.title}</div><button onclick="go(tab)" class="flex items-center gap-1 text-lg font-semibold bg-slate-800 rounded-xl px-3 py-2"><i data-lucide="x" class="w-5 h-5"></i>Salir</button></div>`;
+  const btn=(t,fn,c='bg-amber-500 text-slate-950')=>`<button onclick="${fn}" class="w-full mt-3 rounded-2xl ${c} text-2xl font-extrabold py-4">${t}</button>`;
+  if(fm.phase==='intro')return hdr+`<div class="pop rounded-3xl bg-slate-800 p-5"><div class="flex items-center gap-3 mb-3"><div class="w-12 h-12 rounded-2xl bg-[#0f6e56] border-2 border-[#1d9e75] flex items-center justify-center shrink-0"><i data-lucide="${F.ic}" class="w-7 h-7"></i></div><h2 class="text-3xl font-extrabold leading-tight">${F.title}</h2></div><ul class="space-y-3">${F.intro.map(x=>`<li class="text-xl text-white leading-relaxed">• ${x}</li>`).join('')}</ul>${pict(F.ex)}<div class="text-lg text-slate-100">Verde: lo que ya tienes. Naranja: lo que mueves o quitas.</div>${btn('Empezar','fmBegin()')}</div>`;
+  if(fm.phase==='end'){const nx=pendingForm();return hdr+`<div class="pop rounded-3xl bg-emerald-950 border-2 border-emerald-400 p-6 text-center"><div class="text-5xl">🎉</div><h2 class="text-3xl font-extrabold mt-2">¡Formación completada!</h2><p class="text-xl text-white mt-3 leading-relaxed">Ya viste con tus manos por qué funciona. Ahora toca ganar velocidad con la práctica.</p>${nx?btn('Siguiente formación: '+FORM[nx].title,`startForm('${nx}')`):btn('Ir a practicar',"go('inicio')")}${btn('Ver formaciones',"go('lecciones')",'bg-slate-700 text-white')}</div>`;}
+  const T=fmTask(),s=fm.st;
+  let h=hdr+progBar(fm.ti,n)+`<p class="text-xl text-white mb-1 leading-snug">${fmInstr(T)}</p><div class="text-center text-4xl font-extrabold my-2">${fmLive(T,s)}</div><div class="rounded-3xl bg-slate-950 border border-slate-700 p-3 select-none" style="touch-action:none">${fmBoard(T,s)}</div>`;
+  if(fm.warn)h+=`<div class="pop shake mt-3 rounded-2xl bg-amber-950 border-2 border-amber-500 p-3 text-lg font-semibold">${fm.warn}</div>`;
+  if(fm.phase==='done')h+=`<div class="pop mt-3 rounded-3xl bg-emerald-950 border-2 border-emerald-400 p-4"><div class="text-xl text-white leading-relaxed">${fmMsg(T)}</div>${T.t==='build'?btn(s.rot?'Volver a girar':'Girar el rectángulo','fmRot()','bg-teal-600 text-white'):''}${btn(fm.ti+1<n?'Siguiente':'Terminar formación','fmNext()')}</div>`;
+  else h+=`<button onclick="fmReset()" class="w-full mt-3 rounded-2xl bg-slate-700 py-3 text-xl font-bold flex items-center justify-center gap-2"><i data-lucide="rotate-ccw" class="w-6 h-6"></i>Reiniciar</button>`;
+  return h;
+}
+/* Arrastre y toque de cuadros */
+let fdrag=null;
+document.addEventListener('pointerdown',ev=>{const q=ev.target.closest('[data-sq]');if(!q||!fm)return;ev.preventDefault();ensureAudio();const r=q.getBoundingClientRect();fdrag={g:q.dataset.g,i:+q.dataset.i,x:ev.clientX,y:ev.clientY,ox:ev.clientX-r.left,oy:ev.clientY-r.top,src:q,ghost:null};});
+window.addEventListener('pointermove',ev=>{
+  if(!fdrag)return;
+  if(!fdrag.ghost){if(Math.hypot(ev.clientX-fdrag.x,ev.clientY-fdrag.y)<6)return;const g=fdrag.src.cloneNode(true);g.removeAttribute('data-sq');g.style.position='fixed';g.style.pointerEvents='none';g.style.zIndex='60';g.style.transform='scale(1.12)';g.style.filter='drop-shadow(0 6px 10px rgba(0,0,0,.6))';document.body.appendChild(g);fdrag.ghost=g;fdrag.src.style.opacity='.25';}
+  fdrag.ghost.style.left=(ev.clientX-fdrag.ox)+'px';fdrag.ghost.style.top=(ev.clientY-fdrag.oy)+'px';
+});
+window.addEventListener('pointerup',ev=>{
+  if(!fdrag)return;const d=fdrag;fdrag=null;
+  if(d.ghost){d.ghost.remove();d.src.style.opacity='';const el=document.elementFromPoint(ev.clientX,ev.clientY),z=el&&el.closest('[data-drop]');fmAct(d.g,d.i,z?z.dataset.drop:null,true);}
+  else fmAct(d.g,d.i,null,false);
+});
+window.addEventListener('pointercancel',()=>{if(fdrag&&fdrag.ghost)fdrag.ghost.remove();if(fdrag)fdrag.src.style.opacity='';fdrag=null;});
+
+/* ===== Navegación ===== */
+let tab='inicio',run=null,timers=[],fm=null;
+function clearTimers(){timers.forEach(t=>{clearInterval(t);clearTimeout(t);});timers=[];}
+function go(t){clearTimers();run=null;fm=null;inp='';tab=t;render();}
+const TABS=[['inicio','house','Inicio'],['practicar','dumbbell','Practicar'],['soroban','calculator','Soroban'],['lecciones','blocks','Formación'],['progreso','trending-up','Progreso']];
+function renderNav(){document.getElementById('nav').innerHTML=TABS.map(([id,ic,l])=>`<button onclick="go('${id}')" class="flex flex-col items-center gap-1 py-3 ${tab===id?'text-amber-400':'text-slate-200'}"><i data-lucide="${ic}" class="w-7 h-7"></i><span class="text-sm font-semibold">${l}</span></button>`).join('');}
+function renderTop(){document.getElementById('top').innerHTML=`<div class="flex items-center justify-between"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center text-xl font-black">10</div><div><div class="text-2xl font-extrabold leading-tight">Base10</div><div class="text-base text-slate-200">Matemática diaria</div></div></div><div class="flex flex-col items-end gap-1"><span class="text-base font-bold bg-slate-800 rounded-full px-3 py-1">Nivel ${S.level}</span>${S.testMode?'<span class="text-sm font-bold bg-amber-500 text-slate-950 rounded-full px-3 py-0.5">Modo prueba</span>':''}</div></div>`;}
+function render(){
+  if(landscape&&run&&!(run.stage==='soroban'&&!run.intro)){landscape=false;setRodCount(5);try{if(document.fullscreenElement)document.exitFullscreen();}catch(e){}}
+  renderNav();renderTop();
+  const el=document.getElementById('screen'),L=document.getElementById('land');
+  el.innerHTML=landscape?'':fm?vForm():run?runView():({inicio:vInicio,practicar:vPracticar,soroban:vSorobanTab,lecciones:vFormacion,progreso:vProgreso})[tab]();
+  if(landscape){L.innerHTML=vLand();L.classList.remove('hidden');}else{L.innerHTML='';L.classList.add('hidden');}
+  clearInterval(landTimer);
+  if(landscape&&run&&run.st&&run.st.phase==='q')landTimer=setInterval(()=>{const t=document.getElementById('ltime');if(t&&run&&run.st){const s=Math.floor((performance.now()-run.st.t0)/1000);t.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}},500);
+  lucide.createIcons();
+}
+
+/* ===== Vistas de pestañas ===== */
+function vInicio(){
+  const lv=LEVELS[S.level-1],done=S.studyDays.includes(today());
+  const dots=Array.from({length:CFG.DAYS},(_,i)=>`<span class="w-5 h-5 rounded-full ${i<S.qualify?'bg-emerald-400':'bg-slate-600'}"></span>`).join('');
+  return `<h1 class="text-3xl font-extrabold mb-4">Tu práctica de hoy</h1>
+  <div class="grid grid-cols-2 gap-3 mb-4">
+    <div class="rounded-3xl bg-slate-800 p-4"><i data-lucide="flame" class="w-8 h-8 text-orange-400"></i><div class="text-4xl font-extrabold mt-1">${studyStreak()}</div><div class="text-lg text-slate-100">días seguidos</div></div>
+    <div class="rounded-3xl bg-slate-800 p-4"><i data-lucide="rotate-ccw" class="w-8 h-8 text-rose-400"></i><div class="text-4xl font-extrabold mt-1">${Object.keys(S.bank).length}</div><div class="text-lg text-slate-100">en banco de errores</div></div>
+  </div>
+  ${card(`<div class="text-lg text-slate-100">Nivel ${S.level} de 4</div><div class="text-2xl font-extrabold mb-3">${lv.name}</div>${S.level<4?`<div class="text-lg text-slate-100 mb-2">Para subir de nivel: ${CFG.DAYS} ${S.testMode?'sesiones seguidas':'días seguidos'} cumpliendo la meta</div><div class="flex gap-2">${dots}</div>`:'<div class="text-lg text-emerald-300 font-semibold">¡Tienes desbloqueadas las cuatro operaciones!</div>'}`)}
+  ${pendingForm()?formGate():`<button onclick="startRun('full')" class="w-full rounded-3xl bg-amber-500 text-slate-950 py-5 text-2xl font-extrabold flex items-center justify-center gap-2 mb-3"><i data-lucide="play" class="w-7 h-7"></i>${done?'Practicar otra vez':'Empezar sesión de hoy'}</button>`}
+  ${done?'<div class="text-center text-lg text-emerald-300 font-semibold mb-3">✓ Ya practicaste hoy</div>':''}
+  ${card(`<div class="text-xl font-bold mb-2">La sesión de hoy</div><ol class="space-y-2 text-lg text-slate-100"><li>1. Calentamiento: parejas del 10</li><li>2. Repaso: ${lv.ops.map(o=>OPNAME[o].toLowerCase()).join(', ')}</li><li>3. Soroban: ${TRACKS[curTrack()].name}, ${TRACKS[curTrack()].levels[S.soro[curTrack()].lv-1].l}</li><li>4. Vida real: problemas del día a día</li></ol>`)}`;
+}
+function formGate(){const a=pendingForm(),F=FORM[a];return `<div class="pop rounded-3xl bg-[#04342c] border-2 border-[#1d9e75] p-5 mb-4"><div class="flex items-center gap-2 text-lg font-bold text-emerald-200"><i data-lucide="blocks" class="w-6 h-6"></i>Antes de practicar</div><div class="text-2xl font-extrabold mt-1">Formación: ${F.title}</div><p class="text-lg text-white mt-2 leading-relaxed">Primero experimenta con cuadros para entender por qué funciona. Después se abre la práctica rápida.</p><button onclick="startForm('${a}')" class="w-full mt-4 rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4 flex items-center justify-center gap-2"><i data-lucide="blocks" class="w-7 h-7"></i>Empezar formación</button></div>`;}
+function vPracticar(){
+  if(pendingForm())return `<h1 class="text-3xl font-extrabold mb-4">Practicar</h1>${formGate()}`;
+  const b=(m,ic,t,d)=>`<button onclick="startRun('${m}')" class="w-full text-left rounded-3xl bg-slate-800 hover:bg-slate-700 p-5 mb-3 flex items-center gap-4"><i data-lucide="${ic}" class="w-10 h-10 text-amber-400 shrink-0"></i><div><div class="text-2xl font-bold">${t}</div><div class="text-lg text-slate-100">${d}</div></div></button>`;
+  return `<h1 class="text-3xl font-extrabold mb-4">Practicar</h1>
+  ${b('full','play','Sesión completa','Los cuatro pasos del día')}
+  ${b('warm','flame','Calentamiento',`${CFG.WARM_SECS} s de parejas del 10`)}
+  ${b('repaso','repeat','Repaso',`${CFG.N_REPASO} ejercicios del nivel ${S.level} (cuenta para subir de nivel)`)}
+  ${b('real','shopping-cart','Vida real','Vuelto, compras y porcentajes')}`;
+}
+function vSorobanTab(){
+  return `<h1 class="text-3xl font-extrabold mb-2">Soroban</h1>
+  <p class="text-lg text-slate-100 mb-3">Arriba, 1 cuenta que vale <b style="color:${ORANGE}">5</b>; abajo, 4 que valen <b style="color:${ORANGE}">1</b>. Cuenta la que toca la barra. Toca o arrastra las cuentas.</p>
+  ${soroControls()}
+  ${abacusHTML()}
+  ${digitsOn?`<div class="text-center text-2xl font-bold mt-1">Valor: <span id="sval" style="color:${ORANGE}">${soroVal()}</span></div>`:''}
+  <button onclick="clearAbacus()" class="w-full mt-3 rounded-2xl bg-slate-700 py-3 text-xl font-bold flex items-center justify-center gap-2"><i data-lucide="rotate-ccw" class="w-6 h-6"></i>Limpiar ábaco</button>
+  <h2 class="text-2xl font-extrabold mt-6 mb-1">Retos por niveles</h2>
+  <p class="text-lg text-slate-100 mb-3">${CFG.N_SORO} retos por sesión. Subes de nivel con ${CFG.PREC*100} % de aciertos y el tiempo meta, ${CFG.DAYS} ${S.testMode?'sesiones seguidas':'días seguidos'}.</p>
+  ${trackCards()}
+  <button onclick="startRun('anzan')" class="w-full rounded-3xl bg-violet-600 p-4 text-left flex items-center gap-3 mt-1"><i data-lucide="brain" class="w-10 h-10 shrink-0"></i><div><div class="text-2xl font-extrabold">Anzan</div><div class="text-lg font-semibold">Soroban mental</div></div></button>`;
+}
+function trackCards(){
+  return Object.entries(TRACKS).map(([k,T])=>{
+    const P=S.soro[k],L=T.levels[P.lv-1];
+    if(T.need>S.level)return `<div class="rounded-3xl bg-slate-800/60 p-4 mb-3 flex items-center gap-3"><i data-lucide="lock" class="w-8 h-8 text-slate-300 shrink-0"></i><div><div class="text-xl font-bold text-slate-200">${T.name}</div><div class="text-lg text-slate-300">Se abre en el nivel ${T.need} del repaso</div></div></div>`;
+    const fa=TRACK_AREA[k];if(!S.formDone[fa])return `<div class="rounded-3xl bg-slate-800 p-4 mb-3 flex items-center gap-3"><i data-lucide="blocks" class="w-8 h-8 text-emerald-300 shrink-0"></i><div class="flex-1"><div class="text-xl font-bold">${T.name}</div><div class="text-lg text-amber-300">Primero: formación «${FORM[fa].title}»</div></div><button onclick="startForm('${fa}')" class="rounded-2xl px-4 py-3 text-lg font-extrabold bg-amber-500 text-slate-950">Formación</button></div>`;
+    const dots=Array.from({length:CFG.DAYS},(_,i)=>`<span class="w-4 h-4 rounded-full ${i<P.q?'bg-emerald-400':'bg-slate-600'}"></span>`).join('');
+    const jump=S.testMode?`<div class="flex gap-2 mt-3">${T.levels.map((x,i)=>`<button onclick="setTrackLv('${k}',${i+1})" class="flex-1 rounded-xl py-2 text-base font-bold ${P.lv===i+1?'text-black':'bg-slate-700'}" ${P.lv===i+1?`style="background:${ORANGE}"`:''}>${x.l}</button>`).join('')}</div>`:'';
+    return `<div class="rounded-3xl bg-slate-800 p-4 mb-3"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0" style="background:${ORANGE}"><i data-lucide="${T.ic}" class="w-7 h-7 text-black"></i></div><div class="flex-1"><div class="text-xl font-bold leading-tight">${T.name}</div><div class="text-lg text-slate-100">Nivel ${P.lv}/${T.levels.length}: <b class="text-white">${L.l}</b></div></div><button onclick="startTrack('${k}')" class="rounded-2xl px-4 py-3 text-lg font-extrabold text-black" style="background:${ORANGE}">Practicar</button></div><div class="flex items-center justify-between mt-3"><div class="flex gap-2">${dots}</div><div class="text-lg text-slate-100">Meta: menos de ${L.t} s</div></div>${jump}</div>`;
+  }).join('');
+}
+const LESSONS=[
+  {t:'Base 10 y las parejas del 10',c:['Contamos en grupos de diez: 10 unidades forman 1 decena y 10 decenas forman 1 centena. Por eso usamos solo diez cifras (0 al 9).','Las parejas del 10 son solo seis: 0+10, 1+9, 2+8, 3+7, 4+6 y 5+5.','"Llevar uno" en la suma es completar un 10.','Completar el 10: 8 + 7 → al 8 le faltan 2; tomas 2 del 7 y quedan 5 → 10 + 5 = 15.','La misma idea sirve con el 100: 37 + 63 = 100.']},
+  {t:'El 10 en las cuatro operaciones',c:['Resta, bajar al 10: 13 − 5 → quitas 3 y llegas a 10; quitas 2 más → 8.','Multiplicación, atajo del 10: 9 × 6 = 60 − 6 = 54.','× 5 es la mitad de × 10: 5 × 8 = 80 ÷ 2 = 40.','División: 45 ÷ 5 → duplicas los dos → 90 ÷ 10 = 9.']},
+  {t:'El soroban',c:['Cada varilla es una posición: unidades, decenas, centenas…','Arriba, 1 cuenta que vale 5; abajo, 4 cuentas que valen 1.','Amigos del 5: para sumar 4 a un 3, bajas la cuenta del 5 y quitas 1 (+4 = +5 − 1).','Amigos del 10: para sumar 7 a un 6, sumas 1 en las decenas y quitas 3 en las unidades (+7 = +10 − 3) → 13.']}
+];
+function vFormacion(){
+  const cards=AREAS.map(a=>{const F=FORM[a],open=F.need<=S.level,done=!!S.formDone[a];
+    return `<div class="rounded-3xl bg-slate-800 p-4 mb-3 flex items-center gap-3 ${open?'':'opacity-70'}"><div class="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${done?'bg-emerald-500':'bg-[#0f6e56] border-2 border-[#1d9e75]'}"><i data-lucide="${done?'check':F.ic}" class="w-7 h-7 text-white"></i></div><div class="flex-1"><div class="text-xl font-bold leading-tight">${F.title}</div><div class="text-lg ${done?'text-emerald-300':open?'text-amber-300':'text-slate-300'}">${done?'Completada':open?'Obligatoria antes de practicar':'Se abre en el nivel '+F.need}</div></div>${open?`<button onclick="startForm('${a}')" class="rounded-2xl px-4 py-3 text-lg font-extrabold ${done?'bg-slate-700 text-white':'bg-amber-500 text-slate-950'}">${done?'Repetir':'Empezar'}</button>`:'<i data-lucide="lock" class="w-7 h-7 text-slate-300"></i>'}</div>`;}).join('');
+  return `<h1 class="text-3xl font-extrabold mb-2">Formación</h1>
+  <p class="text-lg text-slate-100 mb-4">Primero experimentas con cuadros; después practicas rápido. Puedes repetir cualquier formación cuando quieras.</p>
+  ${cards}
+  <h2 class="text-2xl font-extrabold mt-6 mb-3">Apuntes</h2>
+  ${LESSONS.map((l,i)=>`<details class="rounded-3xl bg-slate-800 p-5 mb-3" ${i===0?'open':''}><summary class="text-2xl font-bold cursor-pointer list-none flex items-center gap-3"><span class="w-10 h-10 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center font-black shrink-0">${i+1}</span>${l.t}</summary><ul class="mt-4 space-y-3">${l.c.map(x=>`<li class="text-xl text-white leading-relaxed">• ${x}</li>`).join('')}</ul></details>`).join('')}`;
+}
+let resetArm=false;
+function vProgreso(){
+  const steps=LEVELS.map(l=>`<div class="flex items-center gap-3 py-2"><span class="w-9 h-9 rounded-full flex items-center justify-center font-black ${l.n<S.level?'bg-emerald-500 text-slate-950':l.n===S.level?'bg-amber-500 text-slate-950':'bg-slate-700 text-slate-200'}">${l.n<S.level?'✓':l.n}</span><span class="text-xl ${l.n===S.level?'font-bold text-white':'text-slate-100'}">${l.name}</span></div>`).join('');
+  const hist=S.sessions.slice(-10).reverse();
+  const histH=hist.length?hist.map(s=>`<div class="flex justify-between items-center py-2 border-b border-slate-700 text-lg"><span class="text-slate-100">${s.date} · N${s.level}</span><span class="font-bold ${s.acc>=CFG.PREC?'text-emerald-300':'text-rose-300'}">${Math.round(s.acc*100)} %</span><span class="font-bold ${s.avg<CFG.TIME?'text-emerald-300':'text-rose-300'}">${s.avg.toFixed(1)} s</span></div>`).join(''):'<div class="text-lg text-slate-100">Aún no hay sesiones de repaso.</div>';
+  const bank=Object.values(S.bank).sort((a,b)=>b.w-a.w);
+  const bankH=bank.length?`<div class="flex flex-wrap gap-2">${bank.map(b=>`<span class="text-xl font-bold bg-rose-950 border-2 border-rose-500 rounded-xl px-3 py-1">${b.a} ${b.op} ${b.b} <span class="text-rose-300">×${b.w}</span></span>`).join('')}</div>`:'<div class="text-lg text-slate-100">Vacío: no hay ejercicios pendientes.</div>';
+  const ops=Object.keys(S.strategies);
+  const stratH=ops.length?ops.map(op=>{const m=S.strategies[op],tot=Object.values(m).reduce((a,b)=>a+b,0);return `<div class="mb-3"><div class="text-xl font-bold mb-1">${OPNAME[op]}</div>${Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="mb-1"><div class="flex justify-between text-lg"><span>${k}</span><span class="font-bold">${v}</span></div><div class="h-3 bg-slate-700 rounded-full"><div class="h-full bg-sky-400 rounded-full" style="width:${v/tot*100}%"></div></div></div>`).join('')}</div>`;}).join(''):'<div class="text-lg text-slate-100">Aún no hay respuestas.</div>';
+  return `<h1 class="text-3xl font-extrabold mb-4">Progreso</h1>
+  ${card(`<div class="text-xl font-bold mb-1">Niveles</div>${steps}`)}
+  ${card(`<div class="text-xl font-bold mb-2">Meta para subir de nivel</div><div class="space-y-1 text-lg text-white"><div>🎯 Precisión: ${CFG.PREC*100} % o más</div><div>⚡ Tiempo: menos de ${CFG.TIME} s por ejercicio</div><div>📅 Constancia: ${CFG.DAYS} ${S.testMode?'sesiones seguidas':'días seguidos'}</div></div><div class="text-xl font-bold mt-3">Llevas: <span class="text-emerald-300">${S.qualify} de ${CFG.DAYS}</span></div>`)}
+  ${card(`<div class="text-xl font-bold mb-2">Soroban por pista</div>${Object.entries(TRACKS).map(([k,T])=>{const P=S.soro[k];return `<div class="flex justify-between items-center py-2 border-b border-slate-700 text-lg"><span class="${T.need>S.level?'text-slate-400':'text-white'}">${T.name}</span><span class="font-bold">${T.need>S.level?'🔒':`${T.levels[P.lv-1].l} · ${P.q}/${CFG.DAYS}`}</span></div>`;}).join('')}`)}
+  ${card(`<div class="text-xl font-bold mb-2">Historial de repaso</div><div class="flex justify-between text-base font-semibold text-slate-200 pb-1"><span>Fecha · nivel</span><span>Precisión</span><span>Tiempo</span></div>${histH}`)}
+  ${card(`<div class="text-xl font-bold mb-2">Banco de errores</div>${bankH}`)}
+  ${card(`<div class="text-xl font-bold mb-2">Cómo razonas</div>${stratH}`)}
+  ${card(`<div class="text-xl font-bold mb-3">Pruebas</div>
+    <button onclick="toggleTest()" class="w-full flex items-center justify-between rounded-2xl bg-slate-700 px-4 py-3 text-xl font-semibold mb-2"><span>Modo prueba</span><span class="rounded-full px-3 py-1 text-lg font-bold ${S.testMode?'bg-amber-500 text-slate-950':'bg-slate-500'}">${S.testMode?'Activado':'Apagado'}</span></button>
+    <div class="text-lg text-slate-100 mb-3">${S.testMode?'Cada sesión cuenta como un día, para probar los desbloqueos rápido.':'Solo cuentan días distintos y seguidos.'}</div>
+    ${S.testMode?`<div class="text-lg font-semibold mb-2">Saltar a nivel:</div><div class="grid grid-cols-4 gap-2 mb-3">${[1,2,3,4].map(n=>`<button onclick="setLevel(${n})" class="rounded-xl py-3 text-xl font-bold ${S.level===n?'bg-amber-500 text-slate-950':'bg-slate-700'}">${n}</button>`).join('')}</div>`:''}
+    <div class="grid grid-cols-2 gap-2 mb-3"><button onclick="S.formDone={suma:true,resta:true,mult:true,div:true};save();render()" class="rounded-xl bg-slate-700 py-3 text-base font-bold">Formaciones: marcar hechas</button><button onclick="S.formDone={};save();render()" class="rounded-xl bg-slate-700 py-3 text-base font-bold">Formaciones: reiniciar</button></div>
+    <button onclick="resetAll()" class="w-full rounded-2xl ${resetArm?'bg-rose-600':'bg-slate-700'} py-3 text-xl font-bold">${resetArm?'Toca otra vez para confirmar':'Reiniciar todo el progreso'}</button>`)}`;
+}
+function toggleTest(){S.testMode=!S.testMode;S.qualify=0;S.lastQualifyDate=null;save();render();}
+function setLevel(n){S.level=n;S.qualify=0;S.lastQualifyDate=null;save();render();}
+function resetAll(){if(!resetArm){resetArm=true;render();setTimeout(()=>{resetArm=false;if(tab==='progreso'&&!run)render();},4000);return;}resetArm=false;const t=S.testMode;S=DEF();S.testMode=t;save();render();}
+
+/* ===== Motor de sesiones ===== */
+const INFO={
+  warm:{t:'Calentamiento',i:'flame',d:`${CFG.WARM_SECS} segundos de parejas del 10: ¿cuánto le falta a cada número para llegar a 10?`},
+  repaso:{t:'Repaso diario',i:'repeat',d:`${CFG.N_REPASO} ejercicios. Piensa con el 10. De vez en cuando te preguntaré cómo lo resolviste.`},
+  soroban:{t:'Soroban',i:'calculator',d:`${CFG.N_SORO} retos: resuelve la operación moviendo las cuentas y pulsa Comprobar.`},
+  anzan:{t:'Anzan',i:'brain',d:'Verás números uno por uno. Imagina el soroban y lleva la cuenta en tu mente.'},
+  real:{t:'Vida real',i:'shopping-cart',d:`${CFG.N_REAL} problemas del día a día.`}
+};
+function startRun(mode){
+  const pf=pendingForm();if(pf&&mode!=='soroban'){startForm(pf);return;}
+  if(mode==='soroban'&&!S.formDone[TRACK_AREA[curTrack()]]){startForm(TRACK_AREA[curTrack()]);return;}
+  clearTimers();inp='';fm=null;
+  const map={full:['warm','repaso','soroban','real'],warm:['warm'],repaso:['repaso'],soroban:['soroban'],anzan:['anzan'],real:['real']};
+  run={mode,stages:[...map[mode],'summary'],si:-1,res:{}};
+  nextStage();
+}
+function nextStage(){
+  clearTimers();inp='';run.si++;run.stage=run.stages[run.si];run.st={};run.onSubmit=null;
+  run.intro=run.stage!=='summary';
+  if(run.stage==='summary'){if(!S.studyDays.includes(today()))S.studyDays.push(today());save();}
+  render();
+}
+function beginStage(){run.intro=false;({warm:initWarm,repaso:initRepaso,soroban:initSoro,anzan:initAnzan,real:initReal})[run.stage]();render();}
+function runView(){
+  const total=run.stages.length-1;
+  const hdr=`<div class="flex items-center justify-between mb-4"><div class="text-lg font-semibold text-slate-100">${run.stage==='summary'?'Resumen':`Paso ${run.si+1} de ${total}`}</div><button onclick="go(tab)" class="flex items-center gap-1 text-lg font-semibold bg-slate-800 rounded-xl px-3 py-2"><i data-lucide="x" class="w-5 h-5"></i>Salir</button></div>`;
+  if(run.intro){const s=INFO[run.stage];return hdr+`<div class="pop rounded-3xl bg-slate-800 p-6 text-center mt-4"><i data-lucide="${s.i}" class="w-14 h-14 mx-auto text-amber-400"></i><h2 class="text-3xl font-extrabold mt-3">${s.t}</h2><p class="text-xl text-white mt-3 leading-relaxed">${run.stage==='soroban'?soroIntro():s.d}</p><button onclick="beginStage()" class="mt-6 w-full rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Empezar</button></div>`;}
+  return hdr+({warm:vWarm,repaso:vRepaso,soroban:vSoro,anzan:vAnzan,real:vReal,summary:vSummary})[run.stage]();
+}
+
+/* --- Calentamiento --- */
+function initWarm(){
+  const st=run.st;st.left=CFG.WARM_SECS;st.ok=0;st.tot=0;st.n=rnd(1,9);
+  run.onSubmit=v=>{
+    const good=v===10-st.n;st.tot++;if(good)st.ok++;flash(good);
+    timers.push(setTimeout(()=>{let n;do{n=rnd(1,9);}while(n===st.n);st.n=n;const q=document.getElementById('wq');if(q)q.textContent=`${n} + ? = 10`;const o=document.getElementById('wok');if(o)o.textContent=st.ok;resetDisp();},200));
+  };
+  timers.push(setInterval(()=>{st.left--;const el=document.getElementById('wt');if(el)el.textContent=st.left;if(st.left<=0){run.res.warm={ok:st.ok,tot:st.tot};nextStage();}},1000));
+}
+function vWarm(){const st=run.st;return `<div class="flex justify-between items-center mb-2"><div class="flex items-center gap-2 text-3xl font-extrabold"><i data-lucide="timer" class="w-8 h-8 text-amber-400"></i><span id="wt">${st.left}</span> s</div><div class="text-3xl font-extrabold text-emerald-400">✓ <span id="wok">${st.ok}</span></div></div><div id="wq" class="text-center text-6xl font-extrabold my-8">${st.n} + ? = 10</div>${padHTML()}`;}
+
+/* --- Repaso --- */
+function initRepaso(){
+  const st=run.st,ops=LEVELS[S.level-1].ops;
+  const fromBank=Object.values(S.bank).filter(b=>ops.includes(b.op)).sort((x,y)=>y.w-x.w).slice(0,3).map(b=>({...b,fromBank:true}));
+  const list=[...fromBank];while(list.length<CFG.N_REPASO)list.push(gen(pick(ops)));
+  st.list=shuffle(list);st.i=0;st.rec=[];st.phase='q';st.helped=false;st.showHint=false;st.t0=performance.now();st.levelBefore=S.level;
+  run.onSubmit=v=>{
+    if(st.phase!=='q')return;
+    const e=st.list[st.i],dt=(performance.now()-st.t0)/1000,right=v===e.ans,good=right&&!st.helped;
+    st.rec.push({dt,good});updBank(e,good&&dt<CFG.TIME);flash(right);
+    if(!right){st.phase='wrong';st.last=v;timers.push(setTimeout(render,200));return;}
+    if(good&&st.i%3===2){timers.push(setTimeout(()=>{st.phase='strat';render();},250));return;}
+    timers.push(setTimeout(nextQ,250));
+  };
+}
+function showHint(){run.st.helped=true;run.st.showHint=true;render();}
+function nextQ(){
+  const st=run.st;st.i++;st.helped=false;st.showHint=false;st.phase='q';inp='';
+  if(st.i>=st.list.length){
+    const acc=st.rec.filter(r=>r.good).length/st.rec.length,avg=mean(st.rec.map(r=>r.dt));
+    const ev=evaluate(acc,avg);
+    S.sessions.push({date:today(),level:st.levelBefore,acc,avg,n:st.rec.length});save();
+    run.res.repaso={acc,avg,...ev};nextStage();return;
+  }
+  st.t0=performance.now();render();
+}
+function chooseStrat(i){const e=run.st.list[run.st.i],n=STRATS[e.op][i];S.strategies[e.op]=S.strategies[e.op]||{};S.strategies[e.op][n]=(S.strategies[e.op][n]||0)+1;save();nextQ();}
+function progBar(i,n){return `<div class="flex items-center gap-3 mb-2"><div class="flex-1 h-3 bg-slate-700 rounded-full overflow-hidden"><div class="h-full bg-amber-400" style="width:${i/n*100}%"></div></div><span class="text-lg font-bold">${i+1}/${n}</span></div>`;}
+function vRepaso(){
+  const st=run.st,e=st.list[st.i];
+  const q=`<div class="text-center text-6xl font-extrabold my-6">${e.a} ${e.op} ${e.b}</div>${e.fromBank?'<div class="text-center text-lg font-semibold text-rose-300 -mt-3 mb-3 flex items-center justify-center gap-1"><i data-lucide="rotate-ccw" class="w-5 h-5"></i>Del banco de errores</div>':''}`;
+  const top=progBar(st.i,st.list.length)+q;
+  if(st.phase==='strat')return top+`<div class="pop rounded-3xl bg-slate-800 p-5"><h3 class="text-2xl font-bold mb-1">¡Correcto! ¿Cómo lo resolviste?</h3><p class="text-lg text-slate-100 mb-4">Así la app mide tu razonamiento, no solo el resultado.</p><div class="grid gap-2">${STRATS[e.op].map((s,i)=>`<button onclick="chooseStrat(${i})" class="text-left text-xl font-semibold bg-slate-700 hover:bg-slate-600 rounded-2xl px-4 py-4">${s}</button>`).join('')}</div></div>`;
+  if(st.phase==='wrong')return top+`<div class="pop rounded-3xl bg-rose-950 border-2 border-rose-500 p-5 mb-3"><div class="text-2xl font-bold">Respondiste ${st.last}</div><div class="text-2xl font-bold text-emerald-300">La respuesta es ${e.ans}</div></div>${hintBox(hint(e),e)}<button onclick="nextQ()" class="w-full rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Siguiente</button>`;
+  return top+(st.showHint?hintBox(hint(e),e):`<button onclick="showHint()" class="w-full mb-3 rounded-2xl bg-sky-900 border-2 border-sky-500 py-3 text-xl font-bold flex items-center justify-center gap-2"><i data-lucide="lightbulb" class="w-6 h-6"></i>¿Cómo se piensa? <span class="text-base font-semibold text-sky-200">(cuenta como fallo)</span></button>`)+padHTML();
+}
+
+/* --- Soroban (retos) --- */
+function initSoro(){const st=run.st,k=curTrack();st.k=k;st.L=TRACKS[k].levels[S.soro[k].lv-1];st.list=Array.from({length:CFG.N_SORO},()=>genSoro(k,st.L));st.i=0;st.rec=[];st.phase='q';st.t0=performance.now();resetRods();}
+function soroIntro(){const k=curTrack(),L=TRACKS[k].levels[S.soro[k].lv-1];return `${CFG.N_SORO} retos de ${TRACKS[k].name}, nivel ${L.l}. Meta: ${CFG.PREC*100} % de aciertos y menos de ${L.t} s por reto.`;}
+function soroCheck(){const st=run.st,e=st.list[st.i],v=soroVal();st.rec.push({good:v===e.ans,dt:(performance.now()-st.t0)/1000});st.last=v;st.phase=v===e.ans?'ok':'wrong';render();}
+function soroNext(){const st=run.st;st.i++;if(st.i>=st.list.length){const ok=st.rec.filter(r=>r.good).length,acc=ok/st.rec.length,avg=mean(st.rec.map(r=>r.dt));run.res.soroban={ok,tot:st.rec.length,acc,avg,k:st.k,L:st.L,...evalTrack(st.k,acc,avg)};nextStage();return;}st.phase='q';resetRods();st.t0=performance.now();render();}
+function vSoro(){
+  const st=run.st,e=st.list[st.i];
+  const verb=e.terms?'Haz cada operación en orden, de izquierda a derecha,':({'+':`Coloca el ${e.a}, suma ${e.b}`,'−':`Coloca el ${e.a}, resta ${e.b}`,'×':'Calcula y deja el resultado','÷':'Calcula y deja el resultado'}[e.op]);
+  let h=`<div class="text-center text-lg font-bold mb-2" style="color:${ORANGE}">${TRACKS[st.k].name} · ${st.L.l}</div>`+progBar(st.i,st.list.length)+`<div class="text-center ${e.text.length>12?'text-4xl':'text-5xl'} font-extrabold my-3">${e.text}</div><div class="text-center text-lg text-slate-100 mb-3">${verb} en el ábaco.</div>`+soroControls()+abacusHTML();
+  if(st.phase==='q')return h+`<div class="grid grid-cols-2 gap-2 mt-3"><button onclick="clearAbacus()" class="rounded-2xl bg-slate-700 py-4 text-xl font-bold">Limpiar</button><button onclick="soroCheck()" class="rounded-2xl bg-emerald-600 py-4 text-xl font-extrabold">Comprobar</button></div>`;
+  if(st.phase==='ok')return h+`<div class="pop rounded-3xl bg-emerald-950 border-2 border-emerald-400 p-4 mt-3 text-2xl font-bold">¡Correcto! ${e.ans}</div><button onclick="soroNext()" class="w-full mt-3 rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Siguiente</button>`;
+  return h+`<div class="pop rounded-3xl bg-rose-950 border-2 border-rose-500 p-4 mt-3"><div class="text-2xl font-bold">En tu ábaco hay ${st.last}</div><div class="text-2xl font-bold text-emerald-300">La respuesta es ${e.ans}</div></div><div class="mt-3">${hintBox(soroHint(e),e)}</div><button onclick="soroNext()" class="w-full rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Siguiente</button>`;
+}
+
+/* --- Anzan --- */
+function initAnzan(){const st=run.st;st.round=0;st.ok=0;newAnzanRound();}
+function newAnzanRound(){
+  const st=run.st,sub=S.level>=2,len=rnd(3,4);let total=rnd(1,9);const seq=[{s:'',n:total}];
+  for(let i=1;i<len;i++){const n=rnd(1,9);if(sub&&Math.random()<.4&&total-n>=0){seq.push({s:'−',n});total-=n;}else{seq.push({s:'+',n});total+=n;}}
+  st.seq=seq;st.total=total;st.k=0;st.blank=false;st.phase='show';run.onSubmit=null;anzanTick();
+}
+function anzanTick(){
+  const st=run.st;render();
+  timers.push(setTimeout(()=>{st.k++;if(st.k>=st.seq.length){st.phase='ask';run.onSubmit=v=>{st.last=v;if(v===st.total)st.ok++;st.phase='res';render();};render();}else{st.blank=true;render();timers.push(setTimeout(()=>{st.blank=false;anzanTick();},250));}},1400));
+}
+function anzanNext(){const st=run.st;st.round++;if(st.round>=CFG.N_ANZAN){run.res.anzan={ok:st.ok,tot:CFG.N_ANZAN};nextStage();}else{inp='';newAnzanRound();}}
+function vAnzan(){
+  const st=run.st,head=`<div class="text-center text-xl font-semibold text-slate-100 mb-2">Ronda ${st.round+1} de ${CFG.N_ANZAN}</div>`;
+  if(st.phase==='show'){const it=st.seq[st.k];return head+`<div class="h-72 rounded-3xl bg-violet-950 border-2 border-violet-500 flex items-center justify-center text-8xl font-black">${st.blank?'':(it.s?it.s+' ':'')+it.n}</div><div class="text-center text-lg text-slate-100 mt-4">Imagina las cuentas moviéndose…</div>`;}
+  if(st.phase==='ask')return head+`<div class="text-center text-3xl font-bold my-6">¿Cuál es el total?</div>`+padHTML();
+  const ok=st.last===st.total,expr=st.seq.map((x,i)=>i?`${x.s} ${x.n}`:x.n).join(' ');
+  return head+`<div class="pop rounded-3xl ${ok?'bg-emerald-950 border-emerald-400':'bg-rose-950 border-rose-500'} border-2 p-5"><div class="text-2xl font-bold">${ok?'¡Correcto!':'Respondiste '+st.last}</div><div class="text-3xl font-extrabold mt-2">${expr} = <span class="text-emerald-300">${st.total}</span></div></div><button onclick="anzanNext()" class="w-full mt-3 rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Siguiente</button>`;
+}
+
+/* --- Vida real --- */
+function genReal(){
+  const L=S.level,pool=['total'];if(L>=2)pool.push('vuelto');if(L>=3)pool.push('varios');if(L>=4)pool.push('p10','p50','p25','desc');
+  switch(pick(pool)){
+    case 'total':{const a=rnd(11,59),b=rnd(3,9);return {txt:`Compras un artículo de ${a} y otro de ${b}. ¿Cuánto pagas en total?`,ans:a+b,h:hint({a,b,op:'+'}),e:{a,b,op:'+'}};}
+    case 'vuelto':{const c=rnd(12,88),nx=Math.ceil(c/10)*10;return {txt:`Algo cuesta ${c}. Pagas con un billete de 100. ¿Cuánto te dan de vuelto?`,ans:100-c,h:c%10?[`De ${c} a ${nx} faltan ${nx-c}.`,`De ${nx} a 100 faltan ${100-nx}.`,`Vuelto: ${nx-c} + ${100-nx} = ${100-c}`]:[`De ${c} a 100 faltan ${100-c}.`]};}
+    case 'varios':{const n=rnd(3,9),p=rnd(3,9);return {txt:`Compras ${n} artículos de ${p} cada uno. ¿Cuánto pagas?`,ans:n*p,h:hint({a:n,b:p,op:'×'}),e:{a:n,b:p,op:'×'}};}
+    case 'p10':{const n=rnd(2,50)*10;return {txt:`¿Cuánto es el 10 % de ${n}?`,ans:n/10,h:['10 % es dividir entre 10.',`Dividir entre 10 es quitar un cero: ${n} → ${n/10}`]};}
+    case 'p50':{const n=rnd(5,60)*2;return {txt:`¿Cuánto es el 50 % de ${n}?`,ans:n/2,h:['50 % es la mitad.',`La mitad de ${n} es ${n/2}`]};}
+    case 'p25':{const n=rnd(3,30)*4;return {txt:`¿Cuánto es el 25 % de ${n}?`,ans:n/4,h:['25 % es la mitad de la mitad.',`Mitad de ${n}: ${n/2}`,`Mitad de ${n/2}: ${n/4}`]};}
+    default:{const n=rnd(2,30)*10;return {txt:`Un producto cuesta ${n} y tiene 10 % de descuento. ¿Cuánto pagas?`,ans:n-n/10,h:[`10 % de ${n} es ${n/10} (quitas un cero).`,`${n} − ${n/10} = ${n-n/10}`]};}
+  }
+}
+function initReal(){
+  const st=run.st;st.list=Array.from({length:CFG.N_REAL},genReal);st.i=0;st.ok=0;st.phase='q';
+  run.onSubmit=v=>{if(st.phase!=='q')return;const p=st.list[st.i];flash(v===p.ans);st.last=v;if(v===p.ans){st.ok++;timers.push(setTimeout(realNext,300));}else{st.phase='wrong';timers.push(setTimeout(render,200));}};
+}
+function realNext(){const st=run.st;st.i++;st.phase='q';inp='';if(st.i>=st.list.length){run.res.real={ok:st.ok,tot:st.list.length};nextStage();return;}render();}
+function vReal(){
+  const st=run.st,p=st.list[st.i];
+  const top=progBar(st.i,st.list.length)+`<div class="rounded-3xl bg-slate-800 p-5 my-3 flex gap-3"><i data-lucide="shopping-cart" class="w-8 h-8 text-amber-400 shrink-0"></i><p class="text-2xl font-semibold leading-snug">${p.txt}</p></div>`;
+  if(st.phase==='wrong')return top+`<div class="pop rounded-3xl bg-rose-950 border-2 border-rose-500 p-5 mb-3"><div class="text-2xl font-bold">Respondiste ${st.last}</div><div class="text-2xl font-bold text-emerald-300">La respuesta es ${p.ans}</div></div>${hintBox(p.h,p.e)}<button onclick="realNext()" class="w-full rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Siguiente</button>`;
+  return top+padHTML();
+}
+
+/* --- Resumen --- */
+function vSummary(){
+  const r=run.res,row=(l,v,ok)=>`<div class="flex justify-between items-center text-xl py-1"><span>${l}</span><span class="font-bold ${ok===undefined?'':ok?'text-emerald-300':'text-rose-300'}">${v}${ok===undefined?'':ok?' ✓':' ✗'}</span></div>`;
+  let h=`<h2 class="text-3xl font-extrabold mb-4">¡Sesión terminada!</h2>`;
+  if(r.warm)h+=card(`<div class="text-xl font-bold mb-1 flex items-center gap-2"><i data-lucide="flame" class="w-6 h-6 text-orange-400"></i>Calentamiento</div>${row('Parejas acertadas',`${r.warm.ok} de ${r.warm.tot}`)}`);
+  if(r.repaso){const x=r.repaso;h+=card(`<div class="text-xl font-bold mb-1 flex items-center gap-2"><i data-lucide="repeat" class="w-6 h-6 text-amber-400"></i>Repaso</div>${row('Precisión',Math.round(x.acc*100)+' %',x.acc>=CFG.PREC)}${row('Tiempo promedio',x.avg.toFixed(1)+' s',x.avg<CFG.TIME)}${x.unlocked?`<div class="pop mt-3 rounded-2xl bg-emerald-600 p-4 text-2xl font-extrabold text-center">🎉 ¡Desbloqueaste el nivel ${S.level}: ${LEVELS[S.level-1].name}!</div>`:`<div class="text-xl mt-2">${x.ok?'Cumpliste la meta.':'Esta vez no se cumplió la meta.'} Llevas <b class="text-emerald-300">${S.qualify} de ${CFG.DAYS}</b>.</div>`}`);}
+  if(r.soroban){const x=r.soroban,T=TRACKS[x.k];h+=card(`<div class="text-xl font-bold mb-1 flex items-center gap-2"><i data-lucide="calculator" class="w-6 h-6 text-amber-400"></i>Soroban · ${T.name} (${x.L.l})</div>${row('Retos correctos',`${x.ok} de ${x.tot}`)}${row('Precisión',Math.round(x.acc*100)+' %',x.acc>=CFG.PREC)}${row('Tiempo promedio',x.avg.toFixed(1)+' s',x.avg<x.L.t)}${x.unlocked?`<div class="pop mt-3 rounded-2xl p-4 text-2xl font-extrabold text-center text-black" style="background:${ORANGE}">🎉 ¡Subiste a ${T.levels[S.soro[x.k].lv-1].l}!</div>`:`<div class="text-xl mt-2">${x.ok?'Cumpliste la meta.':'Esta vez no se cumplió la meta.'} Llevas <b class="text-emerald-300">${S.soro[x.k].q} de ${CFG.DAYS}</b>.</div>`}`);}
+  if(r.anzan)h+=card(`<div class="text-xl font-bold mb-1 flex items-center gap-2"><i data-lucide="brain" class="w-6 h-6 text-violet-400"></i>Anzan</div>${row('Rondas correctas',`${r.anzan.ok} de ${r.anzan.tot}`)}`);
+  if(r.real)h+=card(`<div class="text-xl font-bold mb-1 flex items-center gap-2"><i data-lucide="shopping-cart" class="w-6 h-6 text-amber-400"></i>Vida real</div>${row('Problemas correctos',`${r.real.ok} de ${r.real.tot}`)}`);
+  return h+(pendingForm()?formGate():'')+`<button onclick="go(tab)" class="w-full rounded-2xl bg-amber-500 text-slate-950 text-2xl font-extrabold py-4">Volver</button>`;
+}
+
+render();
+</script>
+</body>
+</html>
