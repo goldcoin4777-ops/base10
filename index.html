@@ -242,11 +242,12 @@ function toggleDigits(){digitsOn=!digitsOn;render();}
 /* Geometría: vertical (p) u horizontal (l) */
 function stageSize(){const vw=innerWidth,vh=innerHeight;return {W:Math.max(vw,vh),H:Math.min(vw,vh),rot:vh>vw};}
 function geo(mode){
-  if(mode!=='l')return {n:5,colW:70,bh:34,bw:62,dig:30};
-  const s=stageSize(),areaW=s.W-96-40,n=areaW>=700?9:7,areaH=s.H-70-56-28-16;
-  const bh=Math.max(20,Math.min(64,Math.floor((areaH-26)/7)-2));
-  const colW=Math.min(Math.floor((areaW-28)/n),Math.round(bh*2.3));
-  return {n,colW,bh,bw:Math.min(colW-6,Math.round(bh*1.9)),dig:Math.max(22,Math.round(bh*.9))};
+  if(mode!=='l')return {n:5,colW:70,bh:34,bw:62,dig:30,fr:14};
+  const W=innerWidth,H=innerHeight,areaW=W-64-24,dig=digitsOn?Math.max(16,Math.min(26,Math.round(H*.055))):0;
+  const bh=Math.max(22,Math.min(72,Math.floor((H-46-16-14-10-(dig?dig+8:0)-10)/7)-2));
+  const n=Math.max(5,Math.min(9,Math.floor((areaW-20)/(bh*2.05))));
+  const colW=Math.min(Math.floor((areaW-20)/n),Math.round(bh*2.4));
+  return {n,colW,bh,bw:Math.min(colW-4,Math.round(bh*1.95)),dig,fr:8};
 }
 /* Posición vertical de cada cuenta. f: 0 = arriba, 1 = abajo (cielo: 1 = activa; tierra: 0 = activa) */
 function beadY(g,kind,k,f){const slot=g.bh+2;if(kind==='h')return 2+f*slot;return 2*g.bh+6+14+2+(k-1)*slot+f*slot;}
@@ -261,11 +262,11 @@ function abacusHTML(mode='p'){
   }).join('');
   const dots=rods.map((_,i)=>(n-1-i)%3===0?`<span class="absolute bg-gray-400" style="width:5px;height:5px;left:${4+(i+.5)*g.colW-2.5}px;top:4.5px"></span>`:'').join('');
   const digits=digitsOn?`<div class="flex justify-center mt-2">${rods.map((r,i)=>`<div id="dg${i}" class="text-center" style="width:${g.colW}px;color:${ORANGE};font-size:${g.dig}px;line-height:1.1">${r.h*5+r.e}</div>`).join('')}</div>`:'';
-  return `<div id="abacus" data-mode="${mode}" class="select-none" style="touch-action:none"><div class="mx-auto bg-black" style="width:fit-content;border:solid ${FRAME};border-width:14px 10px"><div class="relative flex px-1">${cols}<div class="absolute left-0 right-0 z-[5]" style="background:${FRAME};top:${heavenH}px;height:14px">${dots}</div></div></div>${digits}</div>`;
+  return `<div id="abacus" data-mode="${mode}" class="select-none" style="touch-action:none"><div class="mx-auto bg-black" style="width:fit-content;border:solid ${FRAME};border-width:${g.fr}px 10px"><div class="relative flex px-1">${cols}<div class="absolute left-0 right-0 z-[5]" style="background:${FRAME};top:${heavenH}px;height:14px">${dots}</div></div></div>${digits}</div>`;
 }
 
 /* Clic y arrastre de cuentas: la cuenta sigue el dedo, empuja a sus vecinas y al soltar se desliza a su lugar */
-const rotatedNow=()=>landscape&&innerHeight>innerWidth;
+const rotatedNow=()=>false;
 document.addEventListener('pointerdown',ev=>{
   const b=ev.target.closest('[data-bead]');if(!b)return;ev.preventDefault();ensureAudio();
   const ab=document.getElementById('abacus'),i=+b.dataset.i,k=+b.dataset.k,r=rods[i],h=b.dataset.bead==='h';
@@ -288,32 +289,33 @@ window.addEventListener('pointerup',()=>{
 window.addEventListener('pointercancel',()=>{if(drag){drag=null;updAbacus();}});
 
 /* Pantalla horizontal */
-function openLand(){
-  landscape=true;setRodCount(geo('l').n);
-  try{const el=document.documentElement;if(el.requestFullscreen)el.requestFullscreen().then(()=>{try{screen.orientation.lock('landscape').catch(()=>{});}catch(e){}}).catch(()=>{});}catch(e){}
-  render();
+/* Horizontal automático: al girar el celular, el soroban ocupa toda la pantalla */
+const coarse=matchMedia('(pointer: coarse)').matches;
+function wantLand(){
+  if(!(innerWidth>innerHeight&&(coarse||innerHeight<=560))||fm)return false;
+  return run?(run.stage==='soroban'&&!run.intro):tab==='soroban';
 }
-function closeLand(){landscape=false;setRodCount(5);try{if(document.fullscreenElement)document.exitFullscreen();}catch(e){}render();}
-window.addEventListener('resize',()=>{if(landscape){setRodCount(geo('l').n);render();}});
+let lastLand=false,lastSz='';
+window.addEventListener('resize',()=>{const w=wantLand(),sz=innerWidth+'x'+innerHeight;if(w!==lastLand||(w&&sz!==lastSz))render();});
+function landBack(){if(run)go(tab);else go('inicio');}
 function vLand(){
-  const s=stageSize(),inRun=run&&run.stage==='soroban'&&!run.intro,st=inRun?run.st:null,e=inRun?st.list[st.i]:null;
-  const pos=s.rot?`position:absolute;top:50%;left:50%;width:${s.W}px;height:${s.H}px;transform:translate(-50%,-50%) rotate(90deg)`:'position:absolute;inset:0';
-  const sb=(ic,fn,lbl='')=>`<button onclick="${fn}" class="flex flex-col items-center gap-1 text-white py-1"><i data-lucide="${ic}" class="w-8 h-8"></i>${lbl?`<span class="text-lg">${lbl}</span>`:''}</button>`;
+  const inRun=run&&run.stage==='soroban'&&!run.intro,st=inRun?run.st:null,e=inRun?st.list[st.i]:null;
+  const pos='position:absolute;inset:0';
+  const sb=(ic,fn,lbl='')=>`<button onclick="${fn}" class="flex flex-col items-center gap-1 text-white py-1"><i data-lucide="${ic}" class="w-7 h-7"></i>${lbl?`<span class="text-base">${lbl}</span>`:''}</button>`;
   let title,extra='';
   if(inRun){
     title=e.text;
-    extra=st.phase==='q'?`<button onclick="soroCheck()" class="ml-5 rounded-xl text-black font-extrabold text-xl px-5 py-2" style="background:${ORANGE}">Comprobar</button>`
-      :`<span class="ml-5 text-2xl font-bold ${st.phase==='ok'?'text-emerald-400':'text-rose-400'}">${st.phase==='ok'?'¡Correcto!':'Era '+e.ans}</span><button onclick="soroNext()" class="ml-3 rounded-xl bg-white text-black font-extrabold text-xl px-5 py-2">Siguiente</button>`;
+    extra=st.phase==='q'?`<button onclick="soroCheck()" class="ml-4 rounded-xl text-black font-extrabold text-lg px-4 py-1.5" style="background:${ORANGE}">Comprobar</button>`
+      :`<span class="ml-4 text-xl font-bold ${st.phase==='ok'?'text-emerald-400':'text-rose-400'}">${st.phase==='ok'?'¡Correcto!':'Era '+e.ans}</span><button onclick="soroNext()" class="ml-3 rounded-xl bg-white text-black font-extrabold text-lg px-4 py-1.5">Siguiente</button>`;
   }else title=digitsOn?`<span id="sval" style="color:${ORANGE}">${soroVal()}</span>`:'Soroban';
-  const side=`<div class="w-24 shrink-0 flex flex-col items-center py-4 gap-4" style="background:radial-gradient(circle at 50% 100%,transparent 38%,#232323 39% 44%,transparent 45%) 0 0/26px 13px,#0d0d0d">
-    ${sb('arrow-left','closeLand()')}
-    ${inRun?`<div class="flex flex-col items-center text-white"><i data-lucide="clipboard-list" class="w-8 h-8"></i><span class="text-lg">${st.i+1} / ${st.list.length}</span></div><div class="flex flex-col items-center text-white"><i data-lucide="timer" class="w-8 h-8"></i><span id="ltime" class="text-lg">0:00</span></div>`:''}
+  const side=`<div class="w-16 shrink-0 flex flex-col items-center py-3 gap-3" style="background:radial-gradient(circle at 50% 100%,transparent 38%,#232323 39% 44%,transparent 45%) 0 0/26px 13px,#0d0d0d">
+    ${sb('arrow-left','landBack()')}
+    ${inRun?`<div class="flex flex-col items-center text-white"><i data-lucide="clipboard-list" class="w-7 h-7"></i><span class="text-base">${st.i+1} / ${st.list.length}</span></div><div class="flex flex-col items-center text-white"><i data-lucide="timer" class="w-7 h-7"></i><span id="ltime" class="text-base">0:00</span></div>`:''}
     <div class="flex-1"></div>
     ${sb('rotate-ccw','clearAbacus()')}${sb(digitsOn?'eye':'eye-off','toggleDigits()')}${sb(soundOn?'volume-2':'volume-x','toggleSound()')}</div>`;
-  return `<div style="${pos}" class="flex bg-black">${side}<div class="flex-1 flex flex-col items-center justify-center px-4"><div class="flex items-center mb-3"><span class="text-5xl font-bold text-white">${title}</span>${extra}</div>${abacusHTML('l')}</div></div>`;
+  return `<div style="${pos}" class="flex bg-black">${side}<div class="flex-1 flex flex-col items-center justify-center px-3"><div class="flex items-center mb-1" style="height:42px"><span class="text-3xl font-bold text-white">${title}</span>${extra}</div>${abacusHTML('l')}</div></div>`;
 }
-const soroControls=()=>`<div class="grid grid-cols-3 gap-2 mb-3">
-  <button onclick="openLand()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="rectangle-horizontal" class="w-7 h-7"></i><span class="text-base font-semibold">Horizontal</span></button>
+const soroControls=()=>`<div class="grid grid-cols-2 gap-2 mb-3">
   <button onclick="toggleDigits()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="${digitsOn?'eye':'eye-off'}" class="w-7 h-7"></i><span class="text-base font-semibold">Dígitos</span></button>
   <button onclick="toggleSound()" class="rounded-2xl bg-slate-800 py-3 flex flex-col items-center gap-1"><i data-lucide="${soundOn?'volume-2':'volume-x'}" class="w-7 h-7"></i><span class="text-base font-semibold">Sonido</span></button></div>`;
 
@@ -483,7 +485,7 @@ const TABS=[['inicio','house','Inicio'],['practicar','dumbbell','Practicar'],['s
 function renderNav(){document.getElementById('nav').innerHTML=TABS.map(([id,ic,l])=>`<button onclick="go('${id}')" class="flex flex-col items-center gap-1 py-3 ${tab===id?'text-amber-400':'text-slate-200'}"><i data-lucide="${ic}" class="w-7 h-7"></i><span class="text-sm font-semibold">${l}</span></button>`).join('');}
 function renderTop(){document.getElementById('top').innerHTML=`<div class="flex items-center justify-between"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center text-xl font-black">10</div><div><div class="text-2xl font-extrabold leading-tight">Base10</div><div class="text-base text-slate-200">Matemática diaria</div></div></div><div class="flex flex-col items-end gap-1"><span class="text-base font-bold bg-slate-800 rounded-full px-3 py-1">Nivel ${S.level}</span>${S.testMode?'<span class="text-sm font-bold bg-amber-500 text-slate-950 rounded-full px-3 py-0.5">Modo prueba</span>':''}</div></div>`;}
 function render(){
-  if(landscape&&run&&!(run.stage==='soroban'&&!run.intro)){landscape=false;setRodCount(5);try{if(document.fullscreenElement)document.exitFullscreen();}catch(e){}}
+  landscape=wantLand();lastLand=landscape;lastSz=innerWidth+'x'+innerHeight;setRodCount(landscape?geo('l').n:5);
   renderNav();renderTop();
   const el=document.getElementById('screen'),L=document.getElementById('land');
   el.innerHTML=landscape?'':fm?vForm():run?runView():({inicio:vInicio,practicar:vPracticar,soroban:vSorobanTab,lecciones:vFormacion,progreso:vProgreso})[tab]();
@@ -520,6 +522,7 @@ function vPracticar(){
 function vSorobanTab(){
   return `<h1 class="text-3xl font-extrabold mb-2">Soroban</h1>
   <p class="text-lg text-slate-100 mb-3">Arriba, 1 cuenta que vale <b style="color:${ORANGE}">5</b>; abajo, 4 que valen <b style="color:${ORANGE}">1</b>. Cuenta la que toca la barra. Toca o arrastra las cuentas.</p>
+  <div class="flex items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 mb-3 text-lg font-semibold"><i data-lucide="smartphone" class="w-6 h-6 shrink-0" style="color:${ORANGE}"></i>Gira el celular y el soroban se pone en horizontal, más grande.</div>
   ${soroControls()}
   ${abacusHTML()}
   ${digitsOn?`<div class="text-center text-2xl font-bold mt-1">Valor: <span id="sval" style="color:${ORANGE}">${soroVal()}</span></div>`:''}
